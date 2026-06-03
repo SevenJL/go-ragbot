@@ -25,4 +25,8 @@ type Store interface {
 	AllChunks() []core.Chunk
 	// Replace atomically replaces all stored chunks (used for import).
 	Replace(chunks []core.Chunk) error
+	// SearchHybrid performs both vector (cosine) and keyword (TF-IDF) search,
+	// merging results with Reciprocal Rank Fusion. Falls back to pure vector
+	// search if keywordWeight is 0.
+	SearchHybrid(ctx context.Context, queryVec []float64, queryText string, topK int) ([]core.RetrievedChunk, error)
 }

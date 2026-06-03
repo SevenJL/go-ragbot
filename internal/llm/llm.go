@@ -13,6 +13,10 @@ import (
 type LLM interface {
 	// Chat sends a list of messages and returns the assistant reply text.
 	Chat(ctx context.Context, messages []core.Message) (string, error)
+	// StreamChat sends messages and calls onChunk for each token as it arrives.
+	// Returns the final accumulated text. If the implementation does not support
+	// streaming it falls back to Chat and calls onChunk with the full response.
+	StreamChat(ctx context.Context, messages []core.Message, onChunk func(delta string) error) (string, error)
 	Name() string
 }
 

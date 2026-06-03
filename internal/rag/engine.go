@@ -198,6 +198,113 @@ func (e *Engine) Answer(ctx context.Context, sessionID, message string) (*Answer
 	return &AnswerResult{Answer: answer, Source: "rag", Retrieved: retrieved}, nil
 }
 
+// StreamAnswer is like Answer but streams the LLM response token-by-token via
+// onChunk. It follows the same pipeline: skill → plugin → retrieval → LLM.
+// The retrieved chunks are sanitised in the HTTP layer.
+func (e *Engine) StreamAnswer(ctx context.Context, sessionID, message string, onChunk func(delta string) error) (*AnswerResult, error) {
+	sess := e.sessions.Get(sessionID)
+	sess.Lock()
+	defer sess.Unlock()
+
+	sess.AddMessage("user", message)
+
+	// 1) Active skill.
+	if sess.ActiveSkill != "" {
+		sk := e.skills.Get(sess.ActiveSkill)
+		if sk == nil {
+			sess.EndSkill()
+		} else {
+			reply, _, err := sk.Handle(ctx, sess, message)
+			if err != nil {
+				return nil, err
+			}
+			sess.AddMessage("assistant", reply)
+			// Simulate streaming for skill responses.
+			_ = simulateStreamChunks(reply, onChunk)
+			return &AnswerResult{Answer: reply, Source: "skill", SkillName: sk.Name()}, nil
+		}
+	}
+
+	// 2) Skill trigger.
+	if sk := e.skills.MatchTrigger(message); sk != nil {
+		reply, err := sk.Start(ctx, sess)
+		if err != nil {
+			return nil, err
+		}
+		sess.AddMessage("assistant", reply)
+		_ = simulateStreamChunks(reply, onChunk)
+		return &AnswerResult{Answer: reply, Source: "skill", SkillName: sk.Name()}, nil
+	}
+
+	// 3) Plugin short-circuit.
+	if r, err := e.plugins.RunBeforeRAG(ctx, message); err != nil {
+		return nil, err
+	} else if r != nil && r.Handled {
+		ans, err := e.plugins.RunAfterRAG(ctx, message, r.Answer)
+		if err != nil {
+			return nil, err
+		}
+		sess.AddMessage("assistant", ans)
+		_ = simulateStreamChunks(ans, onChunk)
+		return &AnswerResult{Answer: ans, Source: "plugin"}, nil
+	}
+
+	// 4) Retrieval.
+	retrieved, err := e.retrieve(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+
+	// 5) Fallback.
+	var extra string
+	if !hasGoodHit(retrieved, e.cfg.MinScore) {
+		extra = e.plugins.Fallbacks(ctx, message)
+	}
+
+	// 6) Build prompt + stream LLM.
+	messages := e.buildPrompt(sess, message, retrieved, extra)
+	answer, err := e.llm.StreamChat(ctx, messages, onChunk)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
+
+	// 7) Plugin AfterRAG.
+	answer, err = e.plugins.RunAfterRAG(ctx, message, answer)
+	if err != nil {
+		return nil, err
+	}
+
+	sess.AddMessage("assistant", answer)
+	return &AnswerResult{Answer: answer, Source: "rag", Retrieved: retrieved}, nil
+}
+
+// simulateStreamChunks splits text into sentence-level chunks for streaming,
+// used when the response comes from a non-streaming source (skill, plugin).
+func simulateStreamChunks(text string, onChunk func(string) error) error {
+	if onChunk == nil {
+		return nil
+	}
+	runes := []rune(text)
+	start := 0
+	for i, r := range runes {
+		switch r {
+		case '。', '！', '？', '!', '?', '\n':
+			if chunk := string(runes[start : i+1]); chunk != "" {
+				if err := onChunk(chunk); err != nil {
+					return err
+				}
+			}
+			start = i + 1
+		}
+	}
+	if start < len(runes) {
+		if err := onChunk(string(runes[start:])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *Engine) retrieve(ctx context.Context, query string) ([]core.RetrievedChunk, error) {
 	if e.store.Count() == 0 {
 		return nil, nil
@@ -206,7 +313,8 @@ func (e *Engine) retrieve(ctx context.Context, query string) ([]core.RetrievedCh
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	return e.store.Search(ctx, vecs[0], e.cfg.TopK)
+	// Use hybrid search (vector + keyword with RRF fusion) for better recall.
+	return e.store.SearchHybrid(ctx, vecs[0], query, e.cfg.TopK)
 }
 
 func (e *Engine) buildPrompt(sess *session.Session, query string, retrieved []core.RetrievedChunk, extra string) []core.Message {

@@ -24,6 +24,16 @@ func NewMock() *Mock { return &Mock{} }
 func (m *Mock) Name() string { return "mock" }
 
 func (m *Mock) Chat(ctx context.Context, messages []core.Message) (string, error) {
+	return m.chatInternal(ctx, messages, nil)
+}
+
+// StreamChat simulates streaming by splitting the answer into sentence-sized
+// chunks and calling onChunk for each.
+func (m *Mock) StreamChat(ctx context.Context, messages []core.Message, onChunk func(delta string) error) (string, error) {
+	return m.chatInternal(ctx, messages, onChunk)
+}
+
+func (m *Mock) chatInternal(ctx context.Context, messages []core.Message, onChunk func(delta string) error) (string, error) {
 	var lastUser, system string
 	for _, msg := range messages {
 		switch msg.Role {
@@ -63,7 +73,42 @@ func (m *Mock) Chat(ctx context.Context, messages []core.Message) (string, error
 
 	b.WriteString("\n\n---\n你的问题是：")
 	b.WriteString(strings.TrimSpace(lastUser))
-	return b.String(), nil
+
+	full := b.String()
+
+	// Simulate streaming: split into sentence-sized chunks.
+	if onChunk != nil {
+		_ = simulateStream(full, onChunk)
+	}
+	return full, nil
+}
+
+// simulateStream splits text into sentence-level chunks and calls onChunk for
+// each, simulating the cadence of token-by-token streaming.
+func simulateStream(text string, onChunk func(string) error) error {
+	runes := []rune(text)
+	start := 0
+	for i, r := range runes {
+		switch r {
+		case '。', '！', '？', '!', '?', '\n':
+			chunk := string(runes[start : i+1])
+			if strings.TrimSpace(chunk) != "" {
+				if err := onChunk(chunk); err != nil {
+					return err
+				}
+			}
+			start = i + 1
+		}
+	}
+	if start < len(runes) {
+		chunk := string(runes[start:])
+		if strings.TrimSpace(chunk) != "" {
+			if err := onChunk(chunk); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // extractRelevantSentences picks sentences from the system prompt's context

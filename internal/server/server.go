@@ -42,6 +42,7 @@ type Server struct {
 	cfg         ServerConfig
 	rateLimiter *middleware.RateLimiter
 	audit       *audit.Logger
+	metrics     *Metrics
 }
 
 // New creates a Server with sensible defaults.
@@ -62,7 +63,12 @@ func NewWithConfig(engine *rag.Engine, cfg ServerConfig) *Server {
 		al, _ = audit.NewLogger("") // fallback to stdout-only
 	}
 
-	s := &Server{engine: engine, mux: http.NewServeMux(), cfg: cfg, audit: al}
+	s := &Server{engine: engine, mux: http.NewServeMux(), cfg: cfg, audit: al,
+		metrics: NewMetrics(
+			func() int { return engine.Sessions().Count() },
+			func() int { return engine.Store().Count() },
+		),
+	}
 	if cfg.RateLimitRPS > 0 {
 		burst := cfg.RateBurst
 		if burst <= 0 {
@@ -87,7 +93,7 @@ func (s *Server) Handler() http.Handler {
 	h = middleware.MaxBytes(1 << 20)(h)
 
 	// Structured request logging (innermost to capture accurate timing).
-	h = withStructuredLogging(h)
+	h = s.withStructuredLogging(h)
 
 	// Rate limiting (if configured).
 	if s.rateLimiter != nil {
@@ -121,6 +127,8 @@ func (s *Server) routes() {
 	// Backup & restore.
 	s.mux.HandleFunc("/api/v1/export", s.withAPIAuth(s.handleExport))
 	s.mux.HandleFunc("/api/v1/import", s.withAPIAuth(s.handleImport))
+	// Metrics (Prometheus).
+	s.mux.HandleFunc("/api/v1/metrics", s.metrics.Handler())
 
 	// Backward-compatible /api/ paths redirect to v1.
 	legacy := map[string]string{
@@ -133,6 +141,7 @@ func (s *Server) routes() {
 		"/api/skills":         "/api/v1/skills",
 		"/api/export":         "/api/v1/export",
 		"/api/import":         "/api/v1/import",
+		"/api/metrics":        "/api/v1/metrics",
 	}
 	for old, new := range legacy {
 		target := new
@@ -161,8 +170,9 @@ func actorFromRequest(r *http.Request) string {
 // logging
 // ---------------------------------------------------------------------------
 
-func withStructuredLogging(next http.Handler) http.Handler {
+func (s *Server) withStructuredLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.metrics.RecordRequest()
 		start := time.Now()
 		lw := &logWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(lw, r)
@@ -306,6 +316,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 type chatReq struct {
 	SessionID string `json:"session_id"`
 	Message   string `json:"message"`
+	Stream    bool   `json:"stream"` // request SSE streaming response
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -325,8 +336,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty message")
 		return
 	}
+
+	// Streaming also accepted via query param for EventSource compatibility.
+	if !req.Stream {
+		req.Stream = r.URL.Query().Get("stream") == "true"
+	}
+
+	if req.Stream {
+		s.handleChatStream(w, r, req)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
+
+	s.metrics.RecordChatQuery()
 
 	res, err := s.engine.Answer(ctx, req.SessionID, req.Message)
 	if err != nil {
@@ -334,12 +358,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sanitize retrieved text for defense-in-depth.
-	if res.Retrieved != nil {
-		for i := range res.Retrieved {
-			res.Retrieved[i].Text = htmlEscape(res.Retrieved[i].Text)
-		}
-	}
+	sanitizeRetrieved(res)
 
 	nRetrieved := 0
 	if res.Retrieved != nil {
@@ -348,6 +367,72 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.audit.ChatQuery(actorFromRequest(r), req.SessionID, res.Source, nRetrieved)
 
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleChatStream writes an SSE (Server-Sent Events) stream.
+func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request, req chatReq) {
+	s.metrics.RecordChatQuery()
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+	defer cancel()
+
+	// Stream content chunks; metadata is sent after completion.
+	res, err := s.engine.StreamAnswer(ctx, req.SessionID, req.Message, func(delta string) error {
+		fmt.Fprintf(w, "data: %s\n\n", strings.ReplaceAll(delta, "\n", " "))
+		flusher.Flush()
+		return nil
+	})
+
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	// Send metadata after streaming completes.
+	if res != nil {
+		sanitizeRetrieved(res)
+		meta, _ := json.Marshal(map[string]any{
+			"source":     res.Source,
+			"skill_name": res.SkillName,
+			"retrieved":  res.Retrieved,
+		})
+		fmt.Fprintf(w, "event: meta\ndata: %s\n\n", meta)
+		flusher.Flush()
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+
+	nRetrieved := 0
+	if res != nil && res.Retrieved != nil {
+		nRetrieved = len(res.Retrieved)
+	}
+	source := ""
+	if res != nil {
+		source = res.Source
+	}
+	s.audit.ChatQuery(actorFromRequest(r), req.SessionID, source, nRetrieved)
+}
+
+func sanitizeRetrieved(res *rag.AnswerResult) {
+	if res == nil || res.Retrieved == nil {
+		return
+	}
+	for i := range res.Retrieved {
+		res.Retrieved[i].Text = htmlEscape(res.Retrieved[i].Text)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +469,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
+
+	s.metrics.RecordDocUpload()
 
 	docID, n, err := s.engine.Ingest(ctx, hdr.Filename, data)
 	s.audit.DocUpload(actorFromRequest(r), hdr.Filename, docID, n, err)
