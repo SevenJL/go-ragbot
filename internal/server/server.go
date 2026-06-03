@@ -5,8 +5,9 @@ package server
 import (
 	"context"
 	"crypto/subtle"
-	_ "embed"
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"fmt"
 	"io"
 	"log"
@@ -24,8 +25,21 @@ import (
 	"ragbot/internal/skill"
 )
 
-//go:embed index.html
-var indexHTML []byte
+//go:embed web/dist/* web/dist/assets/*
+var webAssets embed.FS
+
+var (
+	webDistFS   = mustSubFS(webAssets, "web/dist")
+	webAssetFS  = mustSubFS(webAssets, "web/dist/assets")
+)
+
+func mustSubFS(root fs.FS, dir string) fs.FS {
+	sub, err := fs.Sub(root, dir)
+	if err != nil {
+		panic(err)
+	}
+	return sub
+}
 
 // ServerConfig holds options for the HTTP layer.
 type ServerConfig struct {
@@ -176,6 +190,7 @@ func (s *Server) routes() {
 	}
 
 	// Web console (last so it catches / only).
+	s.mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(webAssetFS))))
 	s.mux.HandleFunc("/", s.handleIndex)
 }
 
@@ -330,6 +345,12 @@ func htmlEscape(s string) string {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
+		return
+	}
+
+	indexHTML, err := fs.ReadFile(webAssets, "web/dist/index.html")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "web console unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

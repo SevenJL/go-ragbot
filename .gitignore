@@ -1,6 +1,7 @@
 /data/vectorstore.json
 /data/vectorstore.json.audit.jsonl
 *.audit.jsonl
+/web/node_modules
 
 # Binary
 ragbot

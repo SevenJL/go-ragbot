@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -139,5 +140,32 @@ func TestNotFoundForUnknownPath(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown path, got %d", rec.Code)
+	}
+}
+
+func TestEmbeddedAssetServed(t *testing.T) {
+	srv := testServer(t, "")
+	indexReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(indexRec, indexReq)
+
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, body = %s", indexRec.Code, indexRec.Body.String())
+	}
+
+	match := regexp.MustCompile(`/assets/[^"]+\.css`).FindString(indexRec.Body.String())
+	if match == "" {
+		t.Fatalf("css asset not found in index: %s", indexRec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, match, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("asset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+		t.Fatalf("asset content-type = %q", ct)
 	}
 }
