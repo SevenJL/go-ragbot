@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ragbot/internal/audit"
+	"ragbot/internal/auth"
 	"ragbot/internal/core"
 	"ragbot/internal/middleware"
 	"ragbot/internal/rag"
@@ -28,7 +29,9 @@ var indexHTML []byte
 
 // ServerConfig holds options for the HTTP layer.
 type ServerConfig struct {
-	APIKey       string
+	APIKey       string // legacy shared API key (backward compat)
+	JWTSecret    string // JWT signing secret; empty = JWT auth disabled
+	JWTTTL       time.Duration // token lifetime; 0 = 24h
 	CORS         middleware.CORSConfig
 	RateLimitRPS float64 // requests per second per IP; 0 = no limit
 	RateBurst    int     // max burst; 0 = 2× RPS
@@ -43,7 +46,11 @@ type Server struct {
 	rateLimiter *middleware.RateLimiter
 	audit       *audit.Logger
 	metrics     *Metrics
+	jwtIssuer   *auth.Issuer
 }
+
+// JWTIssuer returns the JWT issuer for external token management (e.g., /api/v1/auth/token).
+func (s *Server) JWTIssuer() *auth.Issuer { return s.jwtIssuer }
 
 // New creates a Server with sensible defaults.
 func New(engine *rag.Engine, apiKey string) *Server {
@@ -69,6 +76,14 @@ func NewWithConfig(engine *rag.Engine, cfg ServerConfig) *Server {
 			func() int { return engine.Store().Count() },
 		),
 	}
+	// Initialize JWT issuer if secret is configured.
+	if cfg.JWTSecret != "" {
+		ttl := cfg.JWTTTL
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		s.jwtIssuer = auth.NewIssuer(cfg.JWTSecret, ttl)
+	}
 	if cfg.RateLimitRPS > 0 {
 		burst := cfg.RateBurst
 		if burst <= 0 {
@@ -85,7 +100,7 @@ func (s *Server) Audit() *audit.Logger { return s.audit }
 
 // Handler returns the full middleware chain:
 //
-//	Recovery → RequestID → SecurityHeaders → CORS → RateLimit → Logging → MaxBytes(1MB)
+//	Recovery → RequestID → JWT(optional) → TenantID → SecurityHeaders → CORS → RateLimit → Logging → MaxBytes(1MB)
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 
@@ -105,6 +120,14 @@ func (s *Server) Handler() http.Handler {
 
 	// Security headers.
 	h = middleware.SecurityHeaders(h)
+
+	// Multi-tenancy — extract tenant ID from header.
+	h = middleware.TenantID(h)
+
+	// JWT optional auth — extracts and verifies token if present.
+	if s.jwtIssuer != nil {
+		h = auth.OptionalAuth(s.jwtIssuer)(h)
+	}
 
 	// Request ID injection.
 	h = middleware.RequestID(h)
@@ -129,6 +152,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/import", s.withAPIAuth(s.handleImport))
 	// Metrics (Prometheus).
 	s.mux.HandleFunc("/api/v1/metrics", s.metrics.Handler())
+	// Auth (JWT token endpoints).
+	s.mux.HandleFunc("/api/v1/auth/token", s.handleAuthToken)
 
 	// Backward-compatible /api/ paths redirect to v1.
 	legacy := map[string]string{
@@ -158,8 +183,12 @@ func (s *Server) routes() {
 // actors — extract a meaningful actor from a request for audit purposes.
 // ---------------------------------------------------------------------------
 
-func actorFromRequest(r *http.Request) string {
-	// Try session ID from query or body (best-effort).
+func (s *Server) actorFromRequest(r *http.Request) string {
+	// Use JWT subject if authenticated.
+	if claims := auth.GetClaims(r.Context()); claims != nil {
+		return claims.Sub
+	}
+	// Fall back to session ID or request ID.
 	if sid := r.URL.Query().Get("session_id"); sid != "" {
 		return sid
 	}
@@ -199,7 +228,18 @@ func (lw *logWriter) WriteHeader(code int) {
 
 func (s *Server) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.APIKey == "" || validAPIKey(r, s.cfg.APIKey) {
+		// Allow if JWT is valid (claims already in context from OptionalAuth).
+		if claims := auth.GetClaims(r.Context()); claims != nil {
+			next(w, r)
+			return
+		}
+		// Allow if legacy API key is valid.
+		if s.cfg.APIKey != "" && validAPIKey(r, s.cfg.APIKey) {
+			next(w, r)
+			return
+		}
+		// Allow if auth is not configured at all (dev mode).
+		if s.cfg.APIKey == "" && s.jwtIssuer == nil {
 			next(w, r)
 			return
 		}
@@ -364,7 +404,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if res.Retrieved != nil {
 		nRetrieved = len(res.Retrieved)
 	}
-	s.audit.ChatQuery(actorFromRequest(r), req.SessionID, res.Source, nRetrieved)
+	s.audit.ChatQuery(s.actorFromRequest(r), req.SessionID, res.Source, nRetrieved)
 
 	writeJSON(w, http.StatusOK, res)
 }
@@ -423,7 +463,88 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request, req ch
 	if res != nil {
 		source = res.Source
 	}
-	s.audit.ChatQuery(actorFromRequest(r), req.SessionID, source, nRetrieved)
+	s.audit.ChatQuery(s.actorFromRequest(r), req.SessionID, source, nRetrieved)
+}
+
+// ---------------------------------------------------------------------------
+// auth — JWT token endpoint
+// ---------------------------------------------------------------------------
+
+type tokenReq struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// handleAuthToken issues a JWT for valid credentials. Accepts legacy API key
+// as password when JWT is not configured, for backward compat.
+func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var req tokenReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+
+	// If JWT issuer is configured, check admin credentials.
+	if s.jwtIssuer != nil {
+		if !s.validateCredentials(req.Username, req.Password) {
+			writeErr(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		role := s.getUserRole(req.Username)
+		tok, err := s.jwtIssuer.Issue(req.Username, role, "")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "token issue failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token": tok.Raw,
+			"token_type":   "Bearer",
+			"expires_in":   int64(s.cfg.JWTTTL.Seconds()),
+			"role":         string(role),
+		})
+		return
+	}
+
+	// Fallback: treat legacy API key as a bearer token.
+	if s.cfg.APIKey != "" && req.Password == s.cfg.APIKey {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"access_token": s.cfg.APIKey,
+			"token_type":   "Bearer",
+			"role":         "admin",
+		})
+		return
+	}
+	writeErr(w, http.StatusUnauthorized, "invalid credentials")
+}
+
+// validateCredentials checks username/password against environment config.
+// In production this would check against a database or OAuth provider.
+func (s *Server) validateCredentials(username, password string) bool {
+	if username == "" || password == "" {
+		return false
+	}
+	// Accept legacy API key as admin password for backward compat.
+	if s.cfg.APIKey != "" && password == s.cfg.APIKey {
+		return true
+	}
+	// For demo purposes, accept a simple admin credential.
+	if username == "admin" && password == "admin" {
+		return true
+	}
+	return false
+}
+
+// getUserRole returns the role for a username. Default: "user".
+// Admin users: any user authenticated with the legacy API key.
+func (s *Server) getUserRole(username string) auth.Role {
+	if username == "admin" {
+		return auth.RoleAdmin
+	}
+	return auth.RoleUser
 }
 
 func sanitizeRetrieved(res *rag.AnswerResult) {
@@ -473,7 +594,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	s.metrics.RecordDocUpload()
 
 	docID, n, err := s.engine.Ingest(ctx, hdr.Filename, data)
-	s.audit.DocUpload(actorFromRequest(r), hdr.Filename, docID, n, err)
+	s.audit.DocUpload(s.actorFromRequest(r), hdr.Filename, docID, n, err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -525,7 +646,7 @@ func (s *Server) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_, n, err := s.engine.UpdateDoc(ctx, docID, hdr.Filename, data)
-	s.audit.DocUpdate(actorFromRequest(r), hdr.Filename, docID, n, err)
+	s.audit.DocUpdate(s.actorFromRequest(r), hdr.Filename, docID, n, err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -542,7 +663,7 @@ func (s *Server) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.engine.Store().Delete(id)
-	s.audit.DocDelete(actorFromRequest(r), id, err)
+	s.audit.DocDelete(s.actorFromRequest(r), id, err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -560,7 +681,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chunks := s.engine.ExportAll()
-	s.audit.Export(actorFromRequest(r))
+	s.audit.Export(s.actorFromRequest(r))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=ragbot-export.json")
 	w.WriteHeader(http.StatusOK)
@@ -594,7 +715,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.engine.ImportAll(req.Chunks)
-	s.audit.Import(actorFromRequest(r), len(req.Chunks), err)
+	s.audit.Import(s.actorFromRequest(r), len(req.Chunks), err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "import failed: "+err.Error())
 		return
@@ -643,7 +764,7 @@ func (s *Server) handlePluginToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.SetEnabled(req.Enabled)
-	s.audit.PluginToggle(actorFromRequest(r), req.Name, req.Enabled)
+	s.audit.PluginToggle(s.actorFromRequest(r), req.Name, req.Enabled)
 	writeJSON(w, http.StatusOK, pluginView{p.Name(), p.Description(), p.IsEnabled()})
 }
 
@@ -690,7 +811,7 @@ func (s *Server) registerSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk, err := skill.NewConfigurableSkill(def)
-	s.audit.SkillRegister(actorFromRequest(r), def.Name, len(def.Steps), err)
+	s.audit.SkillRegister(s.actorFromRequest(r), def.Name, len(def.Steps), err)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -720,7 +841,7 @@ func (s *Server) unregisterSkill(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		err = nil
 	}
-	s.audit.SkillUnregister(actorFromRequest(r), name, err)
+	s.audit.SkillUnregister(s.actorFromRequest(r), name, err)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "failed to unregister")
 		return

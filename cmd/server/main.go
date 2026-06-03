@@ -31,6 +31,7 @@ import (
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config file")
 	env := flag.String("env", "", "environment name (loads config.{env}.json, overrides -config)")
+	watch := flag.Bool("watch", false, "enable config hot-reload (poll mtime)")
 	flag.Parse()
 
 	// Resolve config path: -env takes priority.
@@ -53,10 +54,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("llm: %v", err)
 	}
-	store, err := vectorstore.NewMemory(cfg.RAG.StorePath)
+	baseStore, err := vectorstore.NewMemory(cfg.RAG.StorePath)
 	if err != nil {
 		log.Fatalf("vectorstore: %v", err)
 	}
+	// Wrap with tenant isolation — all chunks are namespaced by tenant ID.
+	store := vectorstore.NewTenantStore(baseStore)
 
 	// ---- plugins ----
 	pm := plugin.NewManager()
@@ -117,6 +120,15 @@ func main() {
 		}
 	}()
 
+	// Config hot-reload (optional, via -watch flag).
+	var watcher *config.Watcher
+	if *watch {
+		watcher = config.NewWatcher(*cfgPath, 5*time.Second, func(newCfg *config.Config) {
+			log.Printf("config: reloaded (llm=%s embed=%s)", newCfg.LLM.Provider, newCfg.Embedding.Provider)
+		})
+		watcher.Start()
+	}
+
 	go func() {
 		log.Printf("embedder=%s  llm=%s  chunks=%d  env=%s", emb.Name(), model.Name(), store.Count(), envOrDefault(*env))
 		log.Printf("plugins=%v  skills=%v", cfg.Plugins.Enabled, cfg.Skills.Enabled)
@@ -154,6 +166,9 @@ func main() {
 	}
 	if err := srv.Audit().Close(); err != nil {
 		log.Printf("audit close: %v", err)
+	}
+	if watcher != nil {
+		watcher.Stop()
 	}
 
 	log.Println("server stopped")

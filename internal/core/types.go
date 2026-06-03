@@ -3,6 +3,8 @@
 // freely without creating import cycles.
 package core
 
+import "context"
+
 // Message is a single chat turn passed to an LLM.
 type Message struct {
 	Role    string `json:"role"` // "system" | "user" | "assistant"
@@ -31,4 +33,19 @@ type DocInfo struct {
 	ID     string `json:"id"`
 	Source string `json:"source"`
 	Chunks int    `json:"chunks"`
+}
+
+// TenantIDKey is the context key type for tenant identification.
+type TenantIDKey struct{}
+
+// TenantCtxKey is the singleton context key used by middleware and engine
+// to carry the tenant ID through the request.
+var TenantCtxKey = TenantIDKey{}
+
+// GetTenantID extracts the tenant ID from a context, returning "default" if absent.
+func GetTenantID(ctx context.Context) string {
+	if tid, ok := ctx.Value(TenantCtxKey).(string); ok && tid != "" {
+		return tid
+	}
+	return "default"
 }

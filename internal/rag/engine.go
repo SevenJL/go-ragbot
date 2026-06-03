@@ -90,7 +90,8 @@ func (e *Engine) Ingest(ctx context.Context, filename string, data []byte) (stri
 			Embedding: vecs[i],
 		}
 	}
-	if err := e.store.Add(ctx, chunks); err != nil {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	if err := e.store.Add(storeCtx, chunks); err != nil {
 		return "", 0, fmt.Errorf("store: %w", err)
 	}
 	return docID, len(chunks), nil
@@ -313,8 +314,9 @@ func (e *Engine) retrieve(ctx context.Context, query string) ([]core.RetrievedCh
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	// Use hybrid search (vector + keyword with RRF fusion) for better recall.
-	return e.store.SearchHybrid(ctx, vecs[0], query, e.cfg.TopK)
+	// Pass tenant-scoped context to store.
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	return e.store.SearchHybrid(storeCtx, vecs[0], query, e.cfg.TopK)
 }
 
 func (e *Engine) buildPrompt(sess *session.Session, query string, retrieved []core.RetrievedChunk, extra string) []core.Message {
