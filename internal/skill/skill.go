@@ -6,6 +6,7 @@ package skill
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"ragbot/internal/session"
 )
@@ -30,16 +31,44 @@ type Skill interface {
 
 // Manager holds the registered skills.
 type Manager struct {
-	skills []Skill
+	skills   []Skill
+	mu       sync.RWMutex
 }
 
 func NewManager() *Manager { return &Manager{} }
 
-func (m *Manager) Register(s Skill) { m.skills = append(m.skills, s) }
+func (m *Manager) Register(s Skill) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skills = append(m.skills, s)
+}
 
-func (m *Manager) All() []Skill { return m.skills }
+// Unregister removes a skill by name. Returns false if the skill was not found.
+// Dynamic skills created at runtime can be removed; built-in skills registered
+// at startup will be re-added on the next restart.
+func (m *Manager) Unregister(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, s := range m.skills {
+		if s.Name() == name {
+			m.skills = append(m.skills[:i], m.skills[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) All() []Skill {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Skill, len(m.skills))
+	copy(out, m.skills)
+	return out
+}
 
 func (m *Manager) Get(name string) Skill {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, s := range m.skills {
 		if s.Name() == name {
 			return s
@@ -50,6 +79,8 @@ func (m *Manager) Get(name string) Skill {
 
 // MatchTrigger returns the first skill whose Match accepts the input.
 func (m *Manager) MatchTrigger(input string) Skill {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, s := range m.skills {
 		if s.Match(input) {
 			return s

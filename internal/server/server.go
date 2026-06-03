@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ragbot/internal/rag"
+	"ragbot/internal/skill"
 )
 
 //go:embed index.html
@@ -243,14 +244,76 @@ func (s *Server) handlePluginToggle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pluginView{p.Name(), p.Description(), p.IsEnabled()})
 }
 
+// skillView is the JSON representation of a skill returned by the API.
+type skillView struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Dynamic     bool   `json:"dynamic"`
+}
+
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
-	type skillView struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+	switch r.Method {
+	case http.MethodGet:
+		s.listSkills(w, r)
+	case http.MethodPost:
+		s.registerSkill(w, r)
+	case http.MethodDelete:
+		s.unregisterSkill(w, r)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "GET, POST or DELETE")
 	}
+}
+
+func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	var out []skillView
 	for _, sk := range s.engine.Skills().All() {
-		out = append(out, skillView{sk.Name(), sk.Description()})
+		_, isDynamic := sk.(*skill.ConfigurableSkill)
+		out = append(out, skillView{Name: sk.Name(), Description: sk.Description(), Dynamic: isDynamic})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) registerSkill(w http.ResponseWriter, r *http.Request) {
+	var def skill.SkillDef
+	if err := json.NewDecoder(r.Body).Decode(&def); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	// Prevent overwriting an existing skill with the same name.
+	if existing := s.engine.Skills().Get(def.Name); existing != nil {
+		writeErr(w, http.StatusConflict, "skill '"+def.Name+"' already exists; DELETE it first or use a different name")
+		return
+	}
+	sk, err := skill.NewConfigurableSkill(def)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.engine.Skills().Register(sk)
+	log.Printf("skills: registered dynamic skill %q (%d steps)", sk.Name(), len(def.Steps))
+	writeJSON(w, http.StatusCreated, skillView{Name: sk.Name(), Description: sk.Description(), Dynamic: true})
+}
+
+func (s *Server) unregisterSkill(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, "missing 'name' query parameter")
+		return
+	}
+	// Only allow unregistering dynamic skills to protect built-in flows.
+	sk := s.engine.Skills().Get(name)
+	if sk == nil {
+		writeErr(w, http.StatusNotFound, "no such skill: "+name)
+		return
+	}
+	if _, isDynamic := sk.(*skill.ConfigurableSkill); !isDynamic {
+		writeErr(w, http.StatusForbidden, "cannot unregister built-in skill '"+name+"'; only runtime-created skills can be removed")
+		return
+	}
+	if !s.engine.Skills().Unregister(name) {
+		writeErr(w, http.StatusInternalServerError, "failed to unregister")
+		return
+	}
+	log.Printf("skills: unregistered dynamic skill %q", name)
+	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 }
