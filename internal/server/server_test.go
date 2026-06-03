@@ -33,7 +33,7 @@ func testServer(t *testing.T, apiKey string) *Server {
 
 func TestAPIAuthDisabledByDefault(t *testing.T) {
 	srv := testServer(t, "")
-	req := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -46,14 +46,14 @@ func TestAPIAuthDisabledByDefault(t *testing.T) {
 func TestAPIAuthRequiresBearerOrAPIKey(t *testing.T) {
 	srv := testServer(t, "secret")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d", rec.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -61,7 +61,7 @@ func TestAPIAuthRequiresBearerOrAPIKey(t *testing.T) {
 		t.Fatalf("bearer status = %d", rec.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"session_id":"s","message":"calculate 2+2"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(`{"session_id":"s","message":"calculate 2+2"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "secret")
 	rec = httptest.NewRecorder()
@@ -73,7 +73,7 @@ func TestAPIAuthRequiresBearerOrAPIKey(t *testing.T) {
 
 func TestHealthEndpoint(t *testing.T) {
 	srv := testServer(t, "")
-	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -84,9 +84,57 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestLegacyAPIPathsRedirect(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("legacy redirect status = %d, want 301", rec.Code)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("missing X-Content-Type-Options header")
+	}
+	if rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("missing X-Frame-Options header")
+	}
+}
+
+func TestCORSHeaders(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/health", nil)
+	req.Header.Set("Origin", "http://example.com")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("missing Access-Control-Allow-Origin, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestRequestIDHeader(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	id := rec.Header().Get("X-Request-ID")
+	if len(id) != 16 {
+		t.Fatalf("expected 16-char hex request ID, got %q", id)
+	}
+}
+
 func TestNotFoundForUnknownPath(t *testing.T) {
 	srv := testServer(t, "")
-	req := httptest.NewRequest(http.MethodGet, "/api/nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/nonexistent", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {

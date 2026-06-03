@@ -90,7 +90,7 @@ async function send(){
   const m = $("#msg").value.trim(); if(!m) return;
   $("#msg").value=""; add(m,"user");
   try{
-    const r = await apiFetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+    const r = await apiFetch("/api/v1/chat",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session_id:sid,message:m})});
     const j = await r.json();
     if(j.error){ add("错误: "+j.error,"bot"); return; }
@@ -106,40 +106,40 @@ $("#up").onclick = async ()=>{
   const fd = new FormData(); fd.append("file", f);
   $("#up").textContent="上传中…"; $("#up").disabled=true;
   try{
-    const r = await apiFetch("/api/upload",{method:"POST",body:fd});
+    const r = await apiFetch("/api/v1/upload",{method:"POST",body:fd});
     const j = await r.json();
     if(j.error) alert("失败: "+j.error); else { add(`✅ 已入库 ${j.filename}（${j.chunks} 个片段）`,"bot","system"); loadDocs(); }
   }finally{ $("#up").textContent="上传并入库"; $("#up").disabled=false; }
 };
 
 async function loadDocs(){
-  const r = await apiFetch("/api/docs"); const docs = await r.json();
+  const r = await apiFetch("/api/v1/docs"); const docs = await r.json();
   $("#docs").innerHTML="";
   (docs||[]).forEach(d=>{
     const el=document.createElement("div"); el.className="item";
     el.innerHTML=`<span>${d.source}<div class="muted">${d.chunks} chunks</div></span>`;
     const b=document.createElement("button"); b.className="ghost"; b.textContent="删除";
-    b.onclick=async()=>{ await apiFetch("/api/docs?id="+encodeURIComponent(d.id),{method:"DELETE"}); loadDocs(); };
+    b.onclick=async()=>{ await apiFetch("/api/v1/docs?id="+encodeURIComponent(d.id),{method:"DELETE"}); loadDocs(); };
     el.appendChild(b); $("#docs").appendChild(el);
   });
 }
 
 async function loadPlugins(){
-  const r = await apiFetch("/api/plugins"); const ps = await r.json();
+  const r = await apiFetch("/api/v1/plugins"); const ps = await r.json();
   $("#plugins").innerHTML="";
   (ps||[]).forEach(p=>{
     const el=document.createElement("div"); el.className="item";
     const left=document.createElement("div"); left.innerHTML=`${p.name}<div class="muted">${p.description}</div>`;
     const lab=document.createElement("label"); lab.className="switch";
     const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=p.enabled;
-    cb.onchange=async()=>{ await apiFetch("/api/plugins/toggle",{method:"POST",headers:{"Content-Type":"application/json"},
+    cb.onchange=async()=>{ await apiFetch("/api/v1/plugins/toggle",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({name:p.name,enabled:cb.checked})}); };
     lab.appendChild(cb); el.appendChild(left); el.appendChild(lab); $("#plugins").appendChild(el);
   });
 }
 
 async function loadSkills(){
-  const r = await apiFetch("/api/skills"); const ss = await r.json();
+  const r = await apiFetch("/api/v1/skills"); const ss = await r.json();
   $("#skills").innerHTML="";
   (ss||[]).forEach(s=>{
     const el=document.createElement("div"); el.className="item";

@@ -1,4 +1,5 @@
-// Package server exposes the engine over HTTP and serves a small web console.
+// Package server exposes the engine over HTTP with a security-hardened
+// middleware chain and serves an embedded web console.
 package server
 
 import (
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"ragbot/internal/middleware"
 	"ragbot/internal/rag"
 	"ragbot/internal/skill"
 )
@@ -19,41 +21,119 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-type Server struct {
-	engine *rag.Engine
-	mux    *http.ServeMux
-	apiKey string
+// ServerConfig holds options for the HTTP layer.
+type ServerConfig struct {
+	APIKey      string
+	CORS        middleware.CORSConfig
+	RateLimitRPS float64 // requests per second per IP; 0 = no limit
+	RateBurst   int     // max burst; 0 = 2× RPS
 }
 
+// Server holds the engine and HTTP configuration.
+type Server struct {
+	engine      *rag.Engine
+	mux         *http.ServeMux
+	cfg         ServerConfig
+	rateLimiter *middleware.RateLimiter
+}
+
+// New creates a Server. apiKey is "" for no auth.
 func New(engine *rag.Engine, apiKey string) *Server {
-	s := &Server{engine: engine, mux: http.NewServeMux(), apiKey: apiKey}
+	return NewWithConfig(engine, ServerConfig{
+		APIKey:       apiKey,
+		CORS:         middleware.DefaultCORS(),
+		RateLimitRPS: 10,
+		RateBurst:    30,
+	})
+}
+
+// NewWithConfig creates a Server with the full middleware configuration.
+func NewWithConfig(engine *rag.Engine, cfg ServerConfig) *Server {
+	s := &Server{engine: engine, mux: http.NewServeMux(), cfg: cfg}
+	if cfg.RateLimitRPS > 0 {
+		burst := cfg.RateBurst
+		if burst <= 0 {
+			burst = int(cfg.RateLimitRPS * 3)
+		}
+		s.rateLimiter = middleware.NewRateLimiter(cfg.RateLimitRPS, burst)
+	}
 	s.routes()
 	return s
 }
 
-// Handler returns the full middleware chain.
+// Handler returns the full middleware chain:
+//
+//	Recovery → RequestID → SecurityHeaders → CORS → RateLimit → Logging → MaxBytes(1MB)
 func (s *Server) Handler() http.Handler {
-	return withLogging(s.mux)
+	var h http.Handler = s.mux
+
+	// Request body limit (1 MB for general API calls; upload has its own limit).
+	h = middleware.MaxBytes(1 << 20)(h)
+
+	// Structured request logging (innermost to capture accurate timing).
+	h = withStructuredLogging(h)
+
+	// Rate limiting (if configured).
+	if s.rateLimiter != nil {
+		h = s.rateLimiter.Limit(h)
+	}
+
+	// CORS.
+	h = middleware.CORS(s.cfg.CORS)(h)
+
+	// Security headers.
+	h = middleware.SecurityHeaders(h)
+
+	// Request ID injection.
+	h = middleware.RequestID(h)
+
+	// Panic recovery (outermost so it catches panics from everything below).
+	h = middleware.Recovery(h)
+
+	return h
 }
 
 func (s *Server) routes() {
+	// API v1 — all endpoints are versioned.
+	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("/api/v1/chat", s.withAPIAuth(s.handleChat))
+	s.mux.HandleFunc("/api/v1/upload", s.withAPIAuth(s.handleUpload))
+	s.mux.HandleFunc("/api/v1/docs", s.withAPIAuth(s.handleDocs))
+	s.mux.HandleFunc("/api/v1/plugins", s.withAPIAuth(s.handlePlugins))
+	s.mux.HandleFunc("/api/v1/plugins/toggle", s.withAPIAuth(s.handlePluginToggle))
+	s.mux.HandleFunc("/api/v1/skills", s.withAPIAuth(s.handleSkills))
+
+	// Backward-compatible /api/ paths redirect to v1.
+	legacy := map[string]string{
+		"/api/health":        "/api/v1/health",
+		"/api/chat":          "/api/v1/chat",
+		"/api/upload":        "/api/v1/upload",
+		"/api/docs":          "/api/v1/docs",
+		"/api/plugins":       "/api/v1/plugins",
+		"/api/plugins/toggle": "/api/v1/plugins/toggle",
+		"/api/skills":        "/api/v1/skills",
+	}
+	for old, new := range legacy {
+		target := new // capture
+		s.mux.HandleFunc(old, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		})
+	}
+
+	// Web console (last so it catches / only).
 	s.mux.HandleFunc("/", s.handleIndex)
-	s.mux.HandleFunc("/api/health", s.handleHealth)
-	s.mux.HandleFunc("/api/chat", s.withAPIAuth(s.handleChat))
-	s.mux.HandleFunc("/api/upload", s.withAPIAuth(s.handleUpload))
-	s.mux.HandleFunc("/api/docs", s.withAPIAuth(s.handleDocs))
-	s.mux.HandleFunc("/api/plugins", s.withAPIAuth(s.handlePlugins))
-	s.mux.HandleFunc("/api/plugins/toggle", s.withAPIAuth(s.handlePluginToggle))
-	s.mux.HandleFunc("/api/skills", s.withAPIAuth(s.handleSkills))
 }
 
-// withLogging wraps a handler with basic structured request logging.
-func withLogging(next http.Handler) http.Handler {
+// withStructuredLogging logs requests as JSON with request ID and duration.
+func withStructuredLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		lw := &logWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(lw, r)
-		log.Printf("%s %s %d %s", r.Method, r.URL.Path, lw.status, time.Since(start).Round(time.Microsecond))
+		dur := time.Since(start).Round(time.Microsecond)
+		reqID := middleware.GetRequestID(r.Context())
+		log.Printf(`{"req_id":"%s","method":"%s","path":"%s","status":%d,"duration_ms":%.3f}`,
+			reqID, r.Method, r.URL.Path, lw.status, float64(dur.Microseconds())/1000)
 	})
 }
 
@@ -70,7 +150,7 @@ func (lw *logWriter) WriteHeader(code int) {
 
 func (s *Server) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey == "" || validAPIKey(r, s.apiKey) {
+		if s.cfg.APIKey == "" || validAPIKey(r, s.cfg.APIKey) {
 			next(w, r)
 			return
 		}
@@ -111,12 +191,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
-		"chunks":   s.engine.Store().Count(),
-		"plugins":  len(s.engine.Plugins().All()),
-		"skills":   len(s.engine.Skills().All()),
-		"embedder": "ok", // accessible if the server started
-		"llm":      "ok",
+		"status":    "ok",
+		"version":   "v1",
+		"chunks":    s.engine.Store().Count(),
+		"sessions":  s.engine.Sessions().Count(),
+		"plugins":   len(s.engine.Plugins().All()),
+		"skills":    len(s.engine.Skills().All()),
+		"embedder":  s.engine.EmbedderName(),
+		"llm":       s.engine.LLMName(),
 	})
 }
 
@@ -279,7 +361,6 @@ func (s *Server) registerSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
 		return
 	}
-	// Prevent overwriting an existing skill with the same name.
 	if existing := s.engine.Skills().Get(def.Name); existing != nil {
 		writeErr(w, http.StatusConflict, "skill '"+def.Name+"' already exists; DELETE it first or use a different name")
 		return
@@ -300,7 +381,6 @@ func (s *Server) unregisterSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing 'name' query parameter")
 		return
 	}
-	// Only allow unregistering dynamic skills to protect built-in flows.
 	sk := s.engine.Skills().Get(name)
 	if sk == nil {
 		writeErr(w, http.StatusNotFound, "no such skill: "+name)

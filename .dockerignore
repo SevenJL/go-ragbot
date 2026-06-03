@@ -1,0 +1,25 @@
+# Dependencies
+vendor/
+
+# Build output
+ragbot
+ragbot.exe
+
+# Runtime data
+data/vectorstore.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (should be mounted, not baked in)
+*.env
+config.json
+!config.example.json

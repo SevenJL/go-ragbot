@@ -54,6 +54,8 @@ func (e *Engine) Plugins() *plugin.Manager { return e.plugins }
 func (e *Engine) Skills() *skill.Manager   { return e.skills }
 func (e *Engine) Store() vectorstore.Store { return e.store }
 func (e *Engine) Sessions() *session.Store { return e.sessions }
+func (e *Engine) EmbedderName() string     { return e.embedder.Name() }
+func (e *Engine) LLMName() string          { return e.llm.Name() }
 
 // PruneSessions removes idle sessions older than idleTimeout. Sessions with an
 // active multi-turn skill in progress are kept regardless of age.
