@@ -67,17 +67,29 @@ func (l *Local) embedOne(text string) []float64 {
 }
 
 // features extracts lexical features from text:
-//   - latin/alphanumeric tokens, lower-cased
+//   - latin/alphanumeric word unigrams, lower-cased
+//   - latin word bigrams for phrase-level matching
+//   - latin character trigrams (robust against spelling typos and word forms)
 //   - CJK character unigrams and bigrams (good for Chinese without a tokenizer)
+//
+// Feature frequency is dampened with sqrt so common words don't dominate.
 func features(text string) []string {
 	text = strings.ToLower(text)
 	var feats []string
 	var word strings.Builder
 	var cjk []rune
+	var words []string // track consecutive words for bigrams
 
 	flushWord := func() {
 		if word.Len() > 0 {
-			feats = append(feats, "w:"+word.String())
+			w := "w:" + word.String()
+			feats = append(feats, w)
+			// Character trigrams for the word help match similar words.
+			runes := []rune(word.String())
+			for i := 0; i+2 < len(runes); i++ {
+				feats = append(feats, "t:"+string(runes[i:i+3]))
+			}
+			words = append(words, w)
 			word.Reset()
 		}
 	}
@@ -88,7 +100,17 @@ func features(text string) []string {
 				feats = append(feats, "b:"+string(cjk[i])+string(cjk[i+1]))
 			}
 		}
+		// CJK runs also reset the word-bigram window.
+		if len(cjk) > 0 {
+			words = nil
+		}
 		cjk = cjk[:0]
+	}
+	flushBigrams := func() {
+		for i := 0; i+1 < len(words); i++ {
+			feats = append(feats, "p:"+words[i]+"|"+words[i+1])
+		}
+		words = nil
 	}
 
 	for _, r := range text {
@@ -100,13 +122,41 @@ func features(text string) []string {
 			flushCJK()
 			word.WriteRune(r)
 		default:
+			flushBigrams()
 			flushWord()
 			flushCJK()
 		}
 	}
 	flushWord()
+	flushBigrams()
 	flushCJK()
-	return feats
+
+	// Dampen frequency: replace repeated features with sqrt-counted copies.
+	return dampenFreq(feats)
+}
+
+// dampenFreq reduces the impact of high-frequency features by taking sqrt of
+// each feature's occurrence count. This follows the sub-linear TF scaling used
+// in BM25 / TF-IDF, keeping common words from dominating the sparse vector.
+func dampenFreq(feats []string) []string {
+	counts := map[string]int{}
+	for _, f := range feats {
+		counts[f]++
+	}
+	written := map[string]int{}
+	out := make([]string, 0, len(feats))
+	for _, f := range feats {
+		c := counts[f]
+		limit := int(math.Sqrt(float64(c)))
+		if limit < 1 {
+			limit = 1
+		}
+		if written[f] < limit {
+			out = append(out, f)
+			written[f]++
+		}
+	}
+	return out
 }
 
 func isCJK(r rune) bool {

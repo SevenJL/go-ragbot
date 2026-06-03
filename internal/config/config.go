@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 type ServerConfig struct {
@@ -79,7 +80,11 @@ type Config struct {
 
 // Load reads and parses the config file, applying sensible defaults.
 func Load(path string) (*Config, error) {
-	b, err := os.ReadFile(path)
+	resolved, err := resolvePath(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	b, err := os.ReadFile(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -90,7 +95,43 @@ func Load(path string) (*Config, error) {
 	}
 	c.expandEnv()
 	c.applyDefaults()
+	c.resolveRelativePaths(filepath.Dir(resolved))
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("config validation: %w", err)
+	}
 	return &c, nil
+}
+
+func resolvePath(path string) (string, error) {
+	if path == "" {
+		path = "config.json"
+	}
+	if _, err := os.Stat(path); err == nil {
+		return filepath.Abs(path)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	} else if path != "config.json" || filepath.IsAbs(path) || filepath.Dir(path) != "." {
+		return "", err
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		candidate := filepath.Join(wd, path)
+		if _, err := os.Stat(candidate); err == nil {
+			return filepath.Abs(candidate)
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(wd)
+		if parent == wd {
+			break
+		}
+		wd = parent
+	}
+	return "", os.ErrNotExist
 }
 
 func (c *Config) expandEnv() {
@@ -146,6 +187,55 @@ func (c *Config) applyDefaults() {
 	if c.RAG.StorePath == "" {
 		c.RAG.StorePath = "data/vectorstore.json"
 	}
+}
+
+func (c *Config) resolveRelativePaths(baseDir string) {
+	if c.RAG.StorePath != "" && !filepath.IsAbs(c.RAG.StorePath) {
+		c.RAG.StorePath = filepath.Join(baseDir, c.RAG.StorePath)
+	}
+}
+
+// Validate checks that the loaded configuration is internally consistent.
+func (c *Config) Validate() error {
+	if c.Server.Addr == "" {
+		return fmt.Errorf("server.addr must not be empty")
+	}
+	if c.RAG.ChunkSize <= 0 {
+		return fmt.Errorf("rag.chunk_size must be > 0")
+	}
+	if c.RAG.ChunkOverlap < 0 {
+		return fmt.Errorf("rag.chunk_overlap must be >= 0")
+	}
+	if c.RAG.ChunkOverlap >= c.RAG.ChunkSize {
+		return fmt.Errorf("rag.chunk_overlap (%d) must be < chunk_size (%d)", c.RAG.ChunkOverlap, c.RAG.ChunkSize)
+	}
+	if c.RAG.TopK <= 0 {
+		return fmt.Errorf("rag.top_k must be > 0")
+	}
+	if c.RAG.MinScore < 0 || c.RAG.MinScore > 1 {
+		return fmt.Errorf("rag.min_score must be in [0, 1]")
+	}
+	if c.RAG.StorePath == "" {
+		return fmt.Errorf("rag.store_path must not be empty")
+	}
+	if c.Embedding.Dim <= 0 && c.Embedding.Provider == "local" {
+		return fmt.Errorf("embedding.dim must be > 0 for local provider")
+	}
+	// Validate LLM provider.
+	switch c.LLM.Provider {
+	case "", "mock", "openai", "deepseek", "zhipu", "qwen", "compatible":
+		// ok
+	default:
+		return fmt.Errorf("unknown llm.provider: %s", c.LLM.Provider)
+	}
+	// Validate embedding provider.
+	switch c.Embedding.Provider {
+	case "", "local", "openai", "compatible":
+		// ok
+	default:
+		return fmt.Errorf("unknown embedding.provider: %s", c.Embedding.Provider)
+	}
+	return nil
 }
 
 // Enabled reports whether name is present in list.

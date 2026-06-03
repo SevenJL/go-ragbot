@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -29,16 +30,41 @@ func New(engine *rag.Engine, apiKey string) *Server {
 	return s
 }
 
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler returns the full middleware chain.
+func (s *Server) Handler() http.Handler {
+	return withLogging(s.mux)
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
+	s.mux.HandleFunc("/api/health", s.handleHealth)
 	s.mux.HandleFunc("/api/chat", s.withAPIAuth(s.handleChat))
 	s.mux.HandleFunc("/api/upload", s.withAPIAuth(s.handleUpload))
 	s.mux.HandleFunc("/api/docs", s.withAPIAuth(s.handleDocs))
 	s.mux.HandleFunc("/api/plugins", s.withAPIAuth(s.handlePlugins))
 	s.mux.HandleFunc("/api/plugins/toggle", s.withAPIAuth(s.handlePluginToggle))
 	s.mux.HandleFunc("/api/skills", s.withAPIAuth(s.handleSkills))
+}
+
+// withLogging wraps a handler with basic structured request logging.
+func withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lw := &logWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(lw, r)
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, lw.status, time.Since(start).Round(time.Microsecond))
+	})
+}
+
+// logWriter captures the status code written.
+type logWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (lw *logWriter) WriteHeader(code int) {
+	lw.status = code
+	lw.ResponseWriter.WriteHeader(code)
 }
 
 func (s *Server) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -80,6 +106,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(indexHTML)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"chunks":   s.engine.Store().Count(),
+		"plugins":  len(s.engine.Plugins().All()),
+		"skills":   len(s.engine.Skills().All()),
+		"embedder": "ok", // accessible if the server started
+		"llm":      "ok",
+	})
 }
 
 type chatReq struct {

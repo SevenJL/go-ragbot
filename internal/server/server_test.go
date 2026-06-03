@@ -70,3 +70,26 @@ func TestAPIAuthRequiresBearerOrAPIKey(t *testing.T) {
 		t.Fatalf("x-api-key status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestHealthEndpoint(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("health body = %s", rec.Body.String())
+	}
+}
+
+func TestNotFoundForUnknownPath(t *testing.T) {
+	srv := testServer(t, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/nonexistent", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown path, got %d", rec.Code)
+	}
+}

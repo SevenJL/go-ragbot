@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"strings"
+	"time"
 
 	"ragbot/internal/config"
 	"ragbot/internal/core"
@@ -53,6 +54,12 @@ func (e *Engine) Plugins() *plugin.Manager { return e.plugins }
 func (e *Engine) Skills() *skill.Manager   { return e.skills }
 func (e *Engine) Store() vectorstore.Store { return e.store }
 func (e *Engine) Sessions() *session.Store { return e.sessions }
+
+// PruneSessions removes idle sessions older than idleTimeout. Sessions with an
+// active multi-turn skill in progress are kept regardless of age.
+func (e *Engine) PruneSessions(idleTimeout time.Duration) int {
+	return e.sessions.Cleanup(idleTimeout)
+}
 
 // Ingest loads, chunks, embeds and stores a document. Returns doc id + chunk count.
 func (e *Engine) Ingest(ctx context.Context, filename string, data []byte) (string, int, error) {

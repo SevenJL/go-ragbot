@@ -55,11 +55,52 @@ func (p *WebSearchPlugin) AfterRAG(ctx context.Context, query, answer string) (*
 // Fallback returns extra context text gathered from the web.
 func (p *WebSearchPlugin) Fallback(ctx context.Context, query string) (string, error) {
 	if p.provider == "mock" || p.apiKey == "" {
-		return fmt.Sprintf(
-			"【联网搜索（mock）】未配置真实搜索 API（plugins.websearch.api_key 为空）。"+
-				"在生产中这里会返回关于「%s」的网络搜索摘要。", query), nil
+		return mockFallback(query), nil
 	}
 	return p.tavily(ctx, query)
+}
+
+// mockFallback produces a deterministic but helpful placeholder that explains
+// what a real web search would return. It extracts a short subject from the
+// query so the placeholder feels tailored rather than generic.
+func mockFallback(query string) string {
+	subject := pickSubject(query)
+	var b strings.Builder
+	b.WriteString("【联网搜索（mock）】\n")
+	b.WriteString("未配置真实搜索 API（plugins.websearch.api_key 为空）。\n")
+	b.WriteString("如在生产中使用，这里会返回与「")
+	b.WriteString(subject)
+	b.WriteString("」相关的网络信息。\n\n")
+	b.WriteString("建议操作：\n")
+	b.WriteString("  1. 在 config.json 的 plugins.websearch 中填写 Tavily API Key\n")
+	b.WriteString("  2. 或切换 provider 为其他搜索后端\n")
+	b.WriteString("  3. 也可以上传包含该主题的 PDF/TXT/MD 文档到本地知识库\n")
+	b.WriteString("\n【补充说明】知识库中未检索到与「")
+	b.WriteString(subject)
+	b.WriteString("」直接匹配的片段。请尝试换个提问方式，或补充相关文档。")
+	return b.String()
+}
+
+// pickSubject extracts a short representative phrase from the query.
+func pickSubject(query string) string {
+	// Try to use the first 50 runes; cut at the first CJK sentence break.
+	runes := []rune(strings.TrimSpace(query))
+	maxLen := len(runes)
+	if maxLen > 50 {
+		maxLen = 50
+	}
+	cut := maxLen
+	for i, r := range runes[:maxLen] {
+		switch r {
+		case '。', '！', '？', '!', '?', '\n', '；', ';':
+			cut = i + 1
+			break
+		}
+	}
+	if cut > 0 {
+		return strings.TrimSpace(string(runes[:cut]))
+	}
+	return strings.TrimSpace(query)
 }
 
 type tavilyReq struct {

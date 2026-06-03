@@ -4,6 +4,7 @@ package session
 
 import (
 	"sync"
+	"time"
 
 	"ragbot/internal/core"
 )
@@ -21,11 +22,18 @@ type Session struct {
 	ActiveSkill string
 	SkillStep   int
 	SkillData   map[string]string
+
+	// LastAccess is updated on every Get or Lock so unused sessions can be
+	// pruned by Cleanup.
+	LastAccess time.Time
 }
 
 // Lock serializes mutations to a single conversation. The engine holds this
 // for one full answer turn so multi-turn skills cannot interleave steps.
-func (s *Session) Lock() { s.mu.Lock() }
+func (s *Session) Lock() {
+	s.mu.Lock()
+	s.LastAccess = time.Now()
+}
 
 func (s *Session) Unlock() { s.mu.Unlock() }
 
@@ -62,14 +70,48 @@ func NewStore() *Store {
 	return &Store{sessions: map[string]*Session{}}
 }
 
-// Get returns the session for id, creating it if needed.
+// Get returns the session for id, creating it if needed. It also bumps
+// LastAccess so recently used sessions survive Cleanup.
 func (st *Store) Get(id string) *Session {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s, ok := st.sessions[id]
 	if !ok {
-		s = &Session{ID: id}
+		s = &Session{ID: id, LastAccess: time.Now()}
 		st.sessions[id] = s
+	} else {
+		s.LastAccess = time.Now()
 	}
 	return s
+}
+
+// Count returns the number of active sessions.
+func (st *Store) Count() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.sessions)
+}
+
+// Cleanup removes sessions whose LastAccess is older than idleTimeout. Sessions
+// with an active skill are kept regardless of age. Returns the number pruned.
+func (st *Store) Cleanup(idleTimeout time.Duration) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	cutoff := time.Now().Add(-idleTimeout)
+	pruned := 0
+	for id, s := range st.sessions {
+		s.mu.Lock()
+		// Keep sessions that have an active skill in progress.
+		if s.ActiveSkill != "" {
+			s.mu.Unlock()
+			continue
+		}
+		last := s.LastAccess
+		s.mu.Unlock()
+		if last.Before(cutoff) {
+			delete(st.sessions, id)
+			pruned++
+		}
+	}
+	return pruned
 }
