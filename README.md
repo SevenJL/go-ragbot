@@ -1,65 +1,174 @@
-# RAG Bot (Go)
+# RAG Bot
 
-基于知识库检索的对话机器人：RAG 文档问答 + 可插拔插件 + 多轮 Skill。零第三方依赖，开箱即跑。
+一个基于 Go 的知识库问答机器人，内置 RAG 检索、插件机制、多轮 Skill，以及一个用 `React + Vite + Tailwind CSS` 构建的网页控制台。
+
+默认配置下可以直接离线运行：
+- LLM 使用 mock 实现
+- 向量检索使用本地内存存储
+- 控制台页面由 Go 服务直接托管
+
+更多实现细节见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
+
+## 功能概览
+
+| 功能 | 说明 |
+| --- | --- |
+| RAG 问答 | 上传 PDF / TXT / Markdown，自动分块、嵌入、检索并生成回答 |
+| 插件机制 | 支持 `BeforeRAG`、`AfterRAG`、`FallbackProvider` |
+| 多轮 Skill | 内置 `email`、`weather` 等多轮技能 |
+| 动态 Skill | 运行时通过 API 注册 JSON 定义的 Skill |
+| 流式聊天 | `/api/v1/chat` 支持 SSE 流式返回 |
+| Web 控制台 | 文档管理、插件开关、技能查看、流式聊天 |
+| 安全能力 | API Key、JWT、审计日志、限流、中间件防护 |
 
 ## 快速开始
 
+### 1. 启动服务
+
 ```bash
-go run ./cmd/server      # 打开 http://localhost:8080
+go run ./cmd/server
 ```
 
-无 API Key 时使用 Mock LLM + 本地向量即可体验全流程。
-完整说明见 **[DEVELOPMENT.md](./DEVELOPMENT.md)**（架构、模块、API、配置、扩展指南）。
+启动后访问：
 
-## 能力概览
+```text
+http://localhost:8080
+```
 
-| 能力 | 说明 |
-| --- | --- |
-| RAG 问答 | 上传 PDF / TXT / Markdown → 分块 → 向量化 → 检索 → LLM 生成回答 |
-| 插件机制 | BeforeRAG / AfterRAG 钩子 + FallbackProvider 联网兜底，运行时开关 |
-| 多轮 Skill | EMAIL（发邮件）、Weather（查天气），关键词触发，完成后自动回到 RAG |
-| 动态 Skill | 运行时通过 POST /api/skills 注册新 Skill，JSON 定义多轮流程，无需写代码 |
-| 离线演示 | Mock LLM 会基于检索上下文合成模拟回答，无需任何 API Key |
-| 生产就绪 | 健康检查、请求日志、优雅关闭、会话过期清理、配置校验 |
-
-## 试试看
-
-- `现在几点` — 时间插件直接回答
-- `计算 (3+4)*5` — 计算器插件求值
-- `我要发邮件` — 多轮邮件 Skill
-- `查天气` — 多轮天气 Skill
-- 上传文档后提问 — RAG 检索 + LLM 生成
-- 动态注册 Skill — 无需重启，用 JSON 创建自己的多轮对话：
+### 2. 运行测试
 
 ```bash
-curl -X POST http://localhost:8080/api/skills \
-  -H 'Content-Type: application/json' \
+go test ./...
+```
+
+### 3. 构建二进制
+
+```bash
+go build ./cmd/server
+```
+
+## Web 控制台
+
+项目内置了一个现代化前端控制台，源码在 [web](./web) 目录。
+
+当前控制台支持：
+- 流式聊天
+- 文档上传与删除
+- 插件启停
+- Skill 列表查看
+- API Key 本地保存
+- 服务状态概览
+
+### 前端本地开发
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+### 前端生产构建
+
+```bash
+cd web
+npm install
+npm run build
+```
+
+构建产物会输出到：
+
+```text
+internal/server/web/dist
+```
+
+Go 服务会通过 `embed` 自动托管这份前端构建结果，所以前端代码有改动后，需要重新执行一次 `npm run build`。
+
+## 常见体验路径
+
+- 输入 `现在几点`：触发时间插件
+- 输入 `计算 (3+4)*5`：触发计算器插件
+- 输入 `我要发邮件`：进入多轮邮件 Skill
+- 输入 `查天气`：进入多轮天气 Skill
+- 上传文档后提问：进入标准 RAG 流程
+
+## API 概览
+
+### 核心接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | Web 控制台 |
+| GET | `/api/v1/health` | 健康检查 |
+| POST | `/api/v1/chat` | 聊天问答，支持普通响应和流式响应 |
+| POST | `/api/v1/upload` | 上传文档 |
+| GET | `/api/v1/docs` | 列出已上传文档 |
+| DELETE | `/api/v1/docs?id=<docID>` | 删除文档 |
+| GET | `/api/v1/plugins` | 查看插件列表 |
+| POST | `/api/v1/plugins/toggle` | 开关插件 |
+| GET | `/api/v1/skills` | 查看 Skill 列表 |
+| POST | `/api/v1/skills` | 动态注册 Skill |
+| DELETE | `/api/v1/skills?name=<name>` | 删除动态 Skill |
+| POST | `/api/v1/auth/token` | 申请 JWT Token |
+| GET | `/api/v1/export` | 导出向量数据 |
+| POST | `/api/v1/import` | 导入向量数据 |
+| GET | `/api/v1/metrics` | Prometheus 指标 |
+
+### 流式聊天
+
+向 `/api/v1/chat` 发送：
+
+```json
+{
+  "session_id": "demo",
+  "message": "请总结这份文档",
+  "stream": true
+}
+```
+
+服务端会返回 `text/event-stream`，消息体包含：
+- 普通 `data:` 事件：增量文本
+- `event: meta`：来源信息、Skill 名称、检索片段
+- `data: [DONE]`：流结束
+
+### 动态注册 Skill 示例
+
+```bash
+curl -X POST http://localhost:8080/api/v1/skills \
+  -H "Content-Type: application/json" \
   -d '{
     "name": "order-lunch",
-    "description": "帮大家订餐",
+    "description": "帮助记录点餐",
     "triggers": ["订餐", "点外卖"],
     "steps": [
       {"prompt": "谁要吃饭？", "key": "who"},
       {"prompt": "吃什么？", "key": "dish"}
     ],
-    "finish_prompt": "确认：{who} 点了 {dish}",
-    "finish_message": "✅ {who} 的 {dish} 已记录！"
+    "finish_prompt": "请确认：{who} 点了 {dish}",
+    "finish_message": "{who} 的 {dish} 已记录。"
   }'
-# 然后在聊天框里输入"订餐"即可触发
 ```
 
-## 开发
+## 认证
 
-```bash
-go test ./...     # 运行所有测试（15 个测试文件，>55 个测试用例）
-go vet ./...      # 静态检查
-gofmt -w .        # 格式化
-go build ./cmd/server -o ragbot  # 编译单二进制
+支持两种方式：
+
+### API Key
+
+如果配置了 `server.api_key`，前端控制台遇到 `401` 时会提示输入 API Key，并以 `Authorization: Bearer <token>` 形式自动附带到后续请求中。
+
+### JWT
+
+如果配置了 `server.jwt_secret`，可以通过：
+
+```text
+POST /api/v1/auth/token
 ```
 
-## 接入真实服务
+获取 Token。
 
-参考 `config.example.json`，用环境变量注入 LLM / Embedding / Tavily / SMTP / API Key：
+## 接入真实模型或服务
+
+可以参考 [config.example.json](./config.example.json)，通过环境变量注入配置，例如：
 
 ```bash
 export OPENAI_API_KEY="sk-xxx"
@@ -68,22 +177,25 @@ export OPENAI_MODEL="deepseek-chat"
 export TAVILY_API_KEY="your-tavily-key"
 ```
 
-默认 `config.json` 保持离线 mock，避免密钥写入仓库。
+默认仓库中的 `config.json` 适合本地离线体验。
 
-## API
+## 开发说明
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/` | 网页控制台（嵌入式 HTML） |
-| GET | `/api/health` | 健康检查（状态、chunk 数、插件数等） |
-| POST | `/api/chat` | 对话主入口 |
-| POST | `/api/upload` | 上传文档入库（multipart） |
-| GET | `/api/docs` | 列出已入库文档 |
-| DELETE | `/api/docs?id=<docID>` | 删除某文档全部片段 |
-| GET | `/api/plugins` | 列出插件及启用状态 |
-| POST | `/api/plugins/toggle` | 运行时启用/禁用插件 |
-| GET | `/api/skills` | 列出已加载 Skill |
-| POST | `/api/skills` | 动态注册 Skill（JSON 定义多轮流程） |
-| DELETE | `/api/skills?name=<name>` | 移除动态 Skill（内置 Skill 受保护） |
+常用命令：
 
-对外暴露时配置 `server.api_key`；前端控制台首次 401 时提示输入 API Key。
+```bash
+go test ./...
+go vet ./...
+```
+
+前端改动后的推荐流程：
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+go test ./...
+```
+
+如果你正在调试网页控制台，记得确认 `8080` 端口没有被旧进程占用。
