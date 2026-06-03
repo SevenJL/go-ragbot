@@ -6,16 +6,20 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"ragbot/internal/config"
 	"ragbot/internal/embedding"
 	"ragbot/internal/llm"
+	"ragbot/internal/middleware"
 	"ragbot/internal/plugin"
 	"ragbot/internal/rag"
 	"ragbot/internal/server"
@@ -26,7 +30,15 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config file")
+	env := flag.String("env", "", "environment name (loads config.{env}.json, overrides -config)")
 	flag.Parse()
+
+	// Resolve config path: -env takes priority.
+	if *env != "" {
+		ext := filepath.Ext(*cfgPath)
+		base := (*cfgPath)[:len(*cfgPath)-len(ext)]
+		*cfgPath = fmt.Sprintf("%s.%s%s", base, *env, ext)
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -46,7 +58,7 @@ func main() {
 		log.Fatalf("vectorstore: %v", err)
 	}
 
-	// ---- plugins (loaded + enabled per config.plugins.enabled) ----
+	// ---- plugins ----
 	pm := plugin.NewManager()
 	pm.Register(plugin.NewTimePlugin(config.Enabled(cfg.Plugins.Enabled, "time")))
 	pm.Register(plugin.NewCalculatorPlugin(config.Enabled(cfg.Plugins.Enabled, "calculator")))
@@ -57,7 +69,7 @@ func main() {
 		cfg.Plugins.WebSearch.Endpoint,
 	))
 
-	// ---- skills (loaded per config.skills.enabled) ----
+	// ---- skills ----
 	sm := skill.NewManager()
 	if config.Enabled(cfg.Skills.Enabled, "email") {
 		sm.Register(skill.NewEmailSkill(cfg.Skills.Email))
@@ -68,7 +80,15 @@ func main() {
 
 	sessions := session.NewStore()
 	engine := rag.New(cfg.RAG, emb, store, model, pm, sm, sessions)
-	srv := server.New(engine, cfg.Server.APIKey)
+
+	// ---- server with full config ----
+	srv := server.NewWithConfig(engine, server.ServerConfig{
+		APIKey:       cfg.Server.APIKey,
+		CORS:         serverCORSFromEnv(),
+		RateLimitRPS: 10,
+		RateBurst:    30,
+		AuditLogPath: cfg.RAG.StorePath + ".audit.jsonl",
+	})
 
 	httpSrv := &http.Server{
 		Addr:         cfg.Server.Addr,
@@ -78,7 +98,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Channel to capture server errors from the listen goroutine.
 	errs := make(chan error, 1)
 
 	// Background session pruning (every 10 minutes, 1 hour idle timeout).
@@ -99,7 +118,7 @@ func main() {
 	}()
 
 	go func() {
-		log.Printf("embedder=%s  llm=%s  chunks=%d", emb.Name(), model.Name(), store.Count())
+		log.Printf("embedder=%s  llm=%s  chunks=%d  env=%s", emb.Name(), model.Name(), store.Count(), envOrDefault(*env))
 		log.Printf("plugins=%v  skills=%v", cfg.Plugins.Enabled, cfg.Skills.Enabled)
 		if cfg.Server.APIKey != "" {
 			log.Printf("api auth=enabled")
@@ -121,7 +140,6 @@ func main() {
 		log.Printf("received signal %v, shutting down gracefully...", sig)
 	}
 
-	// Graceful shutdown with a timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	close(cleanupDone)
@@ -130,10 +148,34 @@ func main() {
 		log.Printf("http shutdown: %v", err)
 	}
 
-	// Persist vector store before exiting.
+	// Persist vector store and close audit log.
 	if err := store.Save(); err != nil {
 		log.Printf("vectorstore save: %v", err)
 	}
+	if err := srv.Audit().Close(); err != nil {
+		log.Printf("audit close: %v", err)
+	}
 
 	log.Println("server stopped")
+}
+
+func envOrDefault(e string) string {
+	if e == "" {
+		return "default"
+	}
+	return e
+}
+
+// serverCORSFromEnv reads CORS configuration from environment variables.
+// Set CORS_ALLOWED_ORIGINS to restrict allowed origins (comma-separated),
+// or leave empty for dev-friendly allow-all.
+func serverCORSFromEnv() middleware.CORSConfig {
+	cfg := middleware.DefaultCORS()
+	if origins := os.Getenv("CORS_ALLOWED_ORIGINS"); origins != "" {
+		cfg.AllowedOrigins = strings.Split(origins, ",")
+		for i := range cfg.AllowedOrigins {
+			cfg.AllowedOrigins[i] = strings.TrimSpace(cfg.AllowedOrigins[i])
+		}
+	}
+	return cfg
 }

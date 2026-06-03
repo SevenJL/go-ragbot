@@ -1,1 +1,7 @@
 /data/vectorstore.json
+/data/vectorstore.json.audit.jsonl
+*.audit.jsonl
+
+# Binary
+ragbot
+ragbot.exe

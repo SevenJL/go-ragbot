@@ -21,4 +21,8 @@ type Store interface {
 	Save() error
 	// Count returns the number of stored chunks.
 	Count() int
+	// AllChunks returns every stored chunk for export/backup.
+	AllChunks() []core.Chunk
+	// Replace atomically replaces all stored chunks (used for import).
+	Replace(chunks []core.Chunk) error
 }

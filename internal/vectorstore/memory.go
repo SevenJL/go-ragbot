@@ -139,6 +139,26 @@ func (m *Memory) Delete(docID string) error {
 	return m.saveLocked()
 }
 
+// AllChunks returns a copy of all stored chunks (embeddings included) for
+// export/backup purposes.
+func (m *Memory) AllChunks() []core.Chunk {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]core.Chunk, len(m.chunks))
+	copy(out, m.chunks)
+	return out
+}
+
+// Replace atomically replaces the entire chunk set and persists. Used for
+// bulk import/restore.
+func (m *Memory) Replace(chunks []core.Chunk) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.chunks = make([]core.Chunk, len(chunks))
+	copy(m.chunks, chunks)
+	return m.saveLocked()
+}
+
 // cosine returns the cosine similarity of a and b. Vectors are assumed (but
 // not required) to be normalised; we normalise defensively.
 func cosine(a, b []float64) float64 {

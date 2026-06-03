@@ -96,6 +96,26 @@ func (e *Engine) Ingest(ctx context.Context, filename string, data []byte) (stri
 	return docID, len(chunks), nil
 }
 
+// UpdateDoc re-ingests a document: deletes all chunks for the given docID,
+// then loads, chunks, embeds and stores the new content. Returns the (same)
+// docID and new chunk count.
+func (e *Engine) UpdateDoc(ctx context.Context, docID, filename string, data []byte) (string, int, error) {
+	if err := e.store.Delete(docID); err != nil {
+		return "", 0, fmt.Errorf("delete old chunks for %s: %w", docID, err)
+	}
+	return e.Ingest(ctx, filename, data)
+}
+
+// ExportAll returns every stored chunk (with embeddings) for backup.
+func (e *Engine) ExportAll() []core.Chunk {
+	return e.store.AllChunks()
+}
+
+// ImportAll atomically replaces all stored chunks with the given set.
+func (e *Engine) ImportAll(chunks []core.Chunk) error {
+	return e.store.Replace(chunks)
+}
+
 // AnswerResult is the structured outcome of handling a message.
 type AnswerResult struct {
 	Answer    string                `json:"answer"`
