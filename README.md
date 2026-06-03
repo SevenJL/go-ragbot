@@ -18,6 +18,7 @@ go run ./cmd/server      # 打开 http://localhost:8080
 | RAG 问答 | 上传 PDF / TXT / Markdown → 分块 → 向量化 → 检索 → LLM 生成回答 |
 | 插件机制 | BeforeRAG / AfterRAG 钩子 + FallbackProvider 联网兜底，运行时开关 |
 | 多轮 Skill | EMAIL（发邮件）、Weather（查天气），关键词触发，完成后自动回到 RAG |
+| 动态 Skill | 运行时通过 POST /api/skills 注册新 Skill，JSON 定义多轮流程，无需写代码 |
 | 离线演示 | Mock LLM 会基于检索上下文合成模拟回答，无需任何 API Key |
 | 生产就绪 | 健康检查、请求日志、优雅关闭、会话过期清理、配置校验 |
 
@@ -28,6 +29,24 @@ go run ./cmd/server      # 打开 http://localhost:8080
 - `我要发邮件` — 多轮邮件 Skill
 - `查天气` — 多轮天气 Skill
 - 上传文档后提问 — RAG 检索 + LLM 生成
+- 动态注册 Skill — 无需重启，用 JSON 创建自己的多轮对话：
+
+```bash
+curl -X POST http://localhost:8080/api/skills \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "order-lunch",
+    "description": "帮大家订餐",
+    "triggers": ["订餐", "点外卖"],
+    "steps": [
+      {"prompt": "谁要吃饭？", "key": "who"},
+      {"prompt": "吃什么？", "key": "dish"}
+    ],
+    "finish_prompt": "确认：{who} 点了 {dish}",
+    "finish_message": "✅ {who} 的 {dish} 已记录！"
+  }'
+# 然后在聊天框里输入"订餐"即可触发
+```
 
 ## 开发
 
@@ -64,5 +83,7 @@ export TAVILY_API_KEY="your-tavily-key"
 | GET | `/api/plugins` | 列出插件及启用状态 |
 | POST | `/api/plugins/toggle` | 运行时启用/禁用插件 |
 | GET | `/api/skills` | 列出已加载 Skill |
+| POST | `/api/skills` | 动态注册 Skill（JSON 定义多轮流程） |
+| DELETE | `/api/skills?name=<name>` | 移除动态 Skill（内置 Skill 受保护） |
 
 对外暴露时配置 `server.api_key`；前端控制台首次 401 时提示输入 API Key。

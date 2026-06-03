@@ -236,6 +236,9 @@ type Skill interface {
 - **EmailSkill**：收件人 → 主题 → 正文 → 确认 → 发送（未配置 SMTP 时模拟发送；配置后用
   `net/smtp` 真实发送）。任意时刻输入「取消/退出」可中止。
 - **WeatherSkill**：城市 → 日期 → 返回天气（默认确定性 mock，可接 open-meteo 等）。
+- **ConfigurableSkill**（`generic.go`）：无需写 Go 代码，通过 HTTP API 用 JSON 即可定义
+  多轮 Skill（触发词、步骤、验证规则、确认流程）。适合快速创建临时的收集类任务（订餐、报名、
+  问卷等）。详见第 10.2 节。
 - Skill 完成后调用 `sess.EndSkill()`，引擎自动回到 RAG 模式。
 
 ### 5.9 会话（`internal/session`）
@@ -294,7 +297,9 @@ type Skill interface {
 | DELETE | `/api/docs?id=<docID>` | 删除某文档全部片段 |
 | GET | `/api/plugins` | 列出插件及启用状态 |
 | POST | `/api/plugins/toggle` | 运行时启用/禁用插件 |
-| GET | `/api/skills` | 列出已加载 Skill |
+| GET | `/api/skills` | 列出已加载 Skill（含 `dynamic` 标记） |
+| POST | `/api/skills` | 动态注册 Skill（JSON 定义多轮流程，详见 10.2） |
+| DELETE | `/api/skills?name=<name>` | 移除动态 Skill（内置 Skill 受保护） |
 
 **POST /api/chat**
 
@@ -323,6 +328,47 @@ type Skill interface {
 ```jsonc
 { "name": "websearch", "enabled": false }
 ```
+
+**GET /api/skills**
+
+```jsonc
+[
+  { "name": "email", "description": "多轮引导：发送邮件", "dynamic": false },
+  { "name": "weather", "description": "多轮引导：查询天气", "dynamic": false }
+]
+```
+
+**POST /api/skills** — 动态注册 Skill
+
+```jsonc
+// 请求（完整示例：订餐 Skill）
+{
+  "name": "order-lunch",
+  "description": "帮大家订餐",
+  "triggers": ["订餐", "点外卖", "中午吃"],
+  "steps": [
+    { "prompt": "谁要吃饭？", "key": "who", "validation": "nonempty" },
+    { "prompt": "吃什么？", "key": "dish", "validation": "nonempty" },
+    { "prompt": "几个人？", "key": "count", "validation": "number" }
+  ],
+  "finish_prompt": "确认：{who} 点了 {dish}，{count} 人份",
+  "finish_message": "✅ 已记录！{who} 的 {dish} 订餐完成。",
+  "cancel_message": "好的，不订了。"
+}
+// 响应 201
+{ "name": "order-lunch", "description": "帮大家订餐", "dynamic": true }
+```
+
+Validation 可选值：`nonempty`（默认）、`email`、`number`、`any`。
+
+**DELETE /api/skills?name=order-lunch** — 移除动态 Skill
+
+```jsonc
+{ "deleted": "order-lunch" }
+```
+
+> 内置 Skill（email / weather）不能被删除，返回 403。动态 Skill 在服务重启后会丢失；如需持久化，
+> 将定义写入 `config.json` 并在 `main.go` 启动时注册即可。
 
 示例 curl：
 
@@ -455,6 +501,33 @@ func (p *FooPlugin) AfterRAG(ctx context.Context, q, a string) (*plugin.Result, 
 
 ### 10.2 新增一个 Skill
 
+**方式一：运行时动态注册（无需写 Go 代码，即时生效）**
+
+通过 HTTP API 用 JSON 定义 Skill，适合快速创建临时收集类任务（订餐、报名、问卷等）：
+
+```bash
+curl -X POST http://localhost:8080/api/skills \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "feedback",
+    "description": "收集用户反馈",
+    "triggers": ["反馈", "提建议", "feedback"],
+    "steps": [
+      {"prompt": "请输入反馈内容：", "key": "content"},
+      {"prompt": "评分（1-5）：", "key": "rating", "validation": "number"}
+    ],
+    "finish_prompt": "确认提交：{content}，评分 {rating}",
+    "finish_message": "✅ 感谢反馈！"
+  }'
+```
+
+- `triggers`：用户消息命中任一关键词即触发。
+- `steps[].validation`：`nonempty`（默认）| `email` | `number` | `any`。
+- `finish_prompt` 中可用 `{key}` 占位符展开之前收集的数据。
+- 用户随时输入「取消/退出」可中止流程。
+
+**方式二：用 Go 代码实现永久 Skill**
+
 1. 在 `internal/skill/` 新建文件，实现 `Skill` 接口，用 `sess.SkillStep` / `sess.SkillData` 驱动状态机，
    结束时调用 `sess.EndSkill()` 并返回 `done=true`。
 2. 在 `main.go` 按配置注册：`if config.Enabled(cfg.Skills.Enabled, "foo") { sm.Register(...) }`。
@@ -463,6 +536,9 @@ func (p *FooPlugin) AfterRAG(ctx context.Context, q, a string) (*plugin.Result, 
 > 进阶：当前 Skill 触发是关键词匹配（`MatchTrigger`）。要接入 LLM 意图识别，
 > 可在 `Engine.Answer` 的第 ② 步前增加一次「让 LLM 判断意图并选择 Skill」的调用，
 > 再调用对应 `Skill.Start`。
+
+> 注意：动态 Skill 在服务器重启后会丢失。如需持久化，用方式二或保存 JSON 定义在启动脚本中
+> 通过 API 批量注册。
 
 ### 10.3 接入真实向量库（Chroma）
 
