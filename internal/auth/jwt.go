@@ -25,8 +25,8 @@ const (
 type Claims struct {
 	Sub  string `json:"sub"`  // user identifier
 	Role Role   `json:"role"` // admin | user
-	Iat  int64  `json:"iat"`  // issued at (unix seconds)
-	Exp  int64  `json:"exp"`  // expiration (unix seconds)
+	Iat  int64  `json:"iat"`  // issued at (unix milliseconds)
+	Exp  int64  `json:"exp"`  // expiration (unix milliseconds)
 }
 
 // Token represents a signed JWT.
@@ -62,8 +62,8 @@ func (i *Issuer) Issue(sub string, role Role, jti string) (*Token, error) {
 	c := Claims{
 		Sub:  sub,
 		Role: role,
-		Iat:  now.Unix(),
-		Exp:  now.Add(i.duration).Unix(),
+		Iat:  now.UnixMilli(),
+		Exp:  now.Add(i.duration).UnixMilli(),
 	}
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payloadBytes, _ := json.Marshal(c)
@@ -107,7 +107,7 @@ func (i *Issuer) Verify(raw string) (*Claims, error) {
 	}
 
 	// Check expiration.
-	if time.Now().Unix() > c.Exp {
+	if time.Now().UnixMilli() >= c.Exp {
 		return nil, fmt.Errorf("token expired")
 	}
 

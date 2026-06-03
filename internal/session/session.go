@@ -80,7 +80,11 @@ func (st *Store) Get(id string) *Session {
 		s = &Session{ID: id, LastAccess: time.Now()}
 		st.sessions[id] = s
 	} else {
+		// Touch LastAccess under the session lock to avoid racing with callers
+		// that update the same field while holding Session.mu.
+		s.mu.Lock()
 		s.LastAccess = time.Now()
+		s.mu.Unlock()
 	}
 	return s
 }
