@@ -1,0 +1,53 @@
+{
+  "server": {
+    "addr": ":8080",
+    "api_key": ""
+  },
+
+  "llm": {
+    "provider": "mock",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-chat"
+  },
+
+  "embedding": {
+    "provider": "local",
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "dim": 256
+  },
+
+  "rag": {
+    "chunk_size": 500,
+    "chunk_overlap": 80,
+    "top_k": 4,
+    "min_score": 0.12,
+    "store_path": "data/vectorstore.json"
+  },
+
+  "plugins": {
+    "enabled": ["time", "calculator", "websearch"],
+    "websearch": {
+      "provider": "mock",
+      "api_key": "",
+      "endpoint": "https://api.tavily.com/search"
+    }
+  },
+
+  "skills": {
+    "enabled": ["email", "weather"],
+    "email": {
+      "smtp_host": "",
+      "smtp_port": 587,
+      "username": "",
+      "password": "",
+      "from": ""
+    },
+    "weather": {
+      "provider": "mock",
+      "api_key": ""
+    }
+  }
+}

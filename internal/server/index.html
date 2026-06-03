@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>RAG Bot 控制台</title>
+<style>
+  :root { --bg:#0f1117; --panel:#1a1d27; --line:#2a2e3b; --fg:#e7e9ee; --mut:#9aa0ad; --acc:#6c8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); font-weight:600; }
+  .wrap { display:flex; height:calc(100vh - 51px); }
+  .side { width:320px; border-right:1px solid var(--line); padding:16px; overflow:auto; }
+  .main { flex:1; display:flex; flex-direction:column; }
+  .chat { flex:1; overflow:auto; padding:20px; }
+  .row { padding:14px 20px; border-top:1px solid var(--line); display:flex; gap:10px; }
+  input[type=text]{ flex:1; background:var(--panel); border:1px solid var(--line); color:var(--fg); padding:10px 12px; border-radius:8px; }
+  button { background:var(--acc); color:#fff; border:0; padding:10px 16px; border-radius:8px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--fg); }
+  .msg { margin:10px 0; max-width:80%; padding:10px 14px; border-radius:12px; white-space:pre-wrap; }
+  .user { background:#2a3350; margin-left:auto; }
+  .bot { background:var(--panel); }
+  .tag { font-size:11px; color:var(--mut); margin-bottom:4px; }
+  h3 { margin:18px 0 8px; font-size:13px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  .item { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; font-size:13px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .muted { color:var(--mut); font-size:12px; }
+  label.switch { display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .src { display:inline-block; font-size:10px; padding:1px 6px; border-radius:6px; background:#333a4d; color:#cdd3e0; margin-left:6px; }
+</style>
+</head>
+<body>
+<header>🤖 RAG Bot 控制台 <span class="muted" id="status"></span></header>
+<div class="wrap">
+  <aside class="side">
+    <h3>知识库文档</h3>
+    <input type="file" id="file" accept=".pdf,.txt,.md,.markdown"/>
+    <button id="up" style="width:100%;margin-top:8px">上传并入库</button>
+    <div id="docs"></div>
+
+    <h3>插件（可开关）</h3>
+    <div id="plugins"></div>
+
+    <h3>Skills（说“我要发邮件”/“查天气”触发）</h3>
+    <div id="skills"></div>
+  </aside>
+  <main class="main">
+    <div class="chat" id="chat"></div>
+    <div class="row">
+      <input type="text" id="msg" placeholder="输入问题，回车发送…"/>
+      <button id="send">发送</button>
+    </div>
+  </main>
+</div>
+<script>
+const sid = "web-" + Math.random().toString(36).slice(2);
+const $ = s => document.querySelector(s);
+const chat = $("#chat");
+let authPrompt = null;
+
+function authHeaders(headers = {}) {
+  const key = localStorage.getItem("ragbot_api_key") || "";
+  return key ? { ...headers, "Authorization": "Bearer " + key } : headers;
+}
+
+async function apiFetch(url, options = {}, retried = false) {
+  options.headers = authHeaders(options.headers || {});
+  const res = await fetch(url, options);
+  if (res.status === 401 && !retried) {
+    if (!authPrompt) {
+      authPrompt = Promise.resolve(prompt("API Key")).finally(() => { authPrompt = null; });
+    }
+    const key = await authPrompt;
+    if (key) {
+      localStorage.setItem("ragbot_api_key", key.trim());
+      return apiFetch(url, options, true);
+    }
+  }
+  return res;
+}
+
+function add(text, who, src){
+  const d = document.createElement("div");
+  d.className = "msg " + (who==="user"?"user":"bot");
+  if(src){ const t=document.createElement("div"); t.className="tag"; t.textContent="来源: "+src; d.appendChild(t); }
+  const body=document.createElement("div"); body.textContent=text; d.appendChild(body);
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+
+async function send(){
+  const m = $("#msg").value.trim(); if(!m) return;
+  $("#msg").value=""; add(m,"user");
+  try{
+    const r = await apiFetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session_id:sid,message:m})});
+    const j = await r.json();
+    if(j.error){ add("错误: "+j.error,"bot"); return; }
+    let src = j.source + (j.skill_name? "/"+j.skill_name : "");
+    add(j.answer,"bot",src);
+  }catch(e){ add("请求失败: "+e,"bot"); }
+}
+$("#send").onclick = send;
+$("#msg").addEventListener("keydown", e=>{ if(e.key==="Enter") send(); });
+
+$("#up").onclick = async ()=>{
+  const f = $("#file").files[0]; if(!f){ alert("先选择文件"); return; }
+  const fd = new FormData(); fd.append("file", f);
+  $("#up").textContent="上传中…"; $("#up").disabled=true;
+  try{
+    const r = await apiFetch("/api/upload",{method:"POST",body:fd});
+    const j = await r.json();
+    if(j.error) alert("失败: "+j.error); else { add(`✅ 已入库 ${j.filename}（${j.chunks} 个片段）`,"bot","system"); loadDocs(); }
+  }finally{ $("#up").textContent="上传并入库"; $("#up").disabled=false; }
+};
+
+async function loadDocs(){
+  const r = await apiFetch("/api/docs"); const docs = await r.json();
+  $("#docs").innerHTML="";
+  (docs||[]).forEach(d=>{
+    const el=document.createElement("div"); el.className="item";
+    el.innerHTML=`<span>${d.source}<div class="muted">${d.chunks} chunks</div></span>`;
+    const b=document.createElement("button"); b.className="ghost"; b.textContent="删除";
+    b.onclick=async()=>{ await apiFetch("/api/docs?id="+encodeURIComponent(d.id),{method:"DELETE"}); loadDocs(); };
+    el.appendChild(b); $("#docs").appendChild(el);
+  });
+}
+
+async function loadPlugins(){
+  const r = await apiFetch("/api/plugins"); const ps = await r.json();
+  $("#plugins").innerHTML="";
+  (ps||[]).forEach(p=>{
+    const el=document.createElement("div"); el.className="item";
+    const left=document.createElement("div"); left.innerHTML=`${p.name}<div class="muted">${p.description}</div>`;
+    const lab=document.createElement("label"); lab.className="switch";
+    const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=p.enabled;
+    cb.onchange=async()=>{ await apiFetch("/api/plugins/toggle",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:p.name,enabled:cb.checked})}); };
+    lab.appendChild(cb); el.appendChild(left); el.appendChild(lab); $("#plugins").appendChild(el);
+  });
+}
+
+async function loadSkills(){
+  const r = await apiFetch("/api/skills"); const ss = await r.json();
+  $("#skills").innerHTML="";
+  (ss||[]).forEach(s=>{
+    const el=document.createElement("div"); el.className="item";
+    el.innerHTML=`<span>${s.name}<div class="muted">${s.description}</div></span>`;
+    $("#skills").appendChild(el);
+  });
+}
+
+loadDocs(); loadPlugins(); loadSkills();
+add("你好！我是基于知识库的问答机器人。上传文档后即可提问；试试「现在几点」「计算 (3+4)*5」「我要发邮件」「查天气」。","bot","system");
+</script>
+</body>
+</html>

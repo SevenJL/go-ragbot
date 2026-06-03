@@ -1,0 +1,53 @@
+{
+  "server": {
+    "addr": "${RAGBOT_ADDR}",
+    "api_key": "${RAGBOT_API_KEY}"
+  },
+
+  "llm": {
+    "provider": "openai",
+    "base_url": "${OPENAI_BASE_URL}",
+    "api_key": "${OPENAI_API_KEY}",
+    "model": "${OPENAI_MODEL}"
+  },
+
+  "embedding": {
+    "provider": "openai",
+    "base_url": "${OPENAI_BASE_URL}",
+    "api_key": "${OPENAI_API_KEY}",
+    "model": "${OPENAI_EMBEDDING_MODEL}",
+    "dim": 1536
+  },
+
+  "rag": {
+    "chunk_size": 500,
+    "chunk_overlap": 80,
+    "top_k": 4,
+    "min_score": 0.12,
+    "store_path": "${RAGBOT_STORE_PATH}"
+  },
+
+  "plugins": {
+    "enabled": ["time", "calculator", "websearch"],
+    "websearch": {
+      "provider": "tavily",
+      "api_key": "${TAVILY_API_KEY}",
+      "endpoint": "https://api.tavily.com/search"
+    }
+  },
+
+  "skills": {
+    "enabled": ["email", "weather"],
+    "email": {
+      "smtp_host": "${SMTP_HOST}",
+      "smtp_port": 587,
+      "username": "${SMTP_USERNAME}",
+      "password": "${SMTP_PASSWORD}",
+      "from": "${SMTP_FROM}"
+    },
+    "weather": {
+      "provider": "open-meteo",
+      "api_key": ""
+    }
+  }
+}
