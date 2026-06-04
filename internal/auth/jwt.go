@@ -23,10 +23,11 @@ const (
 
 // Claims is the JWT payload.
 type Claims struct {
-	Sub  string `json:"sub"`  // user identifier
-	Role Role   `json:"role"` // admin | user
-	Iat  int64  `json:"iat"`  // issued at (unix milliseconds)
-	Exp  int64  `json:"exp"`  // expiration (unix milliseconds)
+	Sub    string `json:"sub"`    // user identifier
+	Role   Role   `json:"role"`   // admin | user
+	Tenant string `json:"tenant"` // tenant identifier
+	Iat    int64  `json:"iat"`    // issued at (unix milliseconds)
+	Exp    int64  `json:"exp"`    // expiration (unix milliseconds)
 }
 
 // Token represents a signed JWT.
@@ -58,12 +59,21 @@ func NewIssuer(secret string, ttl time.Duration) *Issuer {
 // Issue creates a signed JWT for the given subject and role. jti is a unique
 // token ID used for revocation.
 func (i *Issuer) Issue(sub string, role Role, jti string) (*Token, error) {
+	return i.IssueForTenant(sub, role, sub, jti)
+}
+
+// IssueForTenant creates a signed JWT bound to a tenant ID.
+func (i *Issuer) IssueForTenant(sub string, role Role, tenant string, jti string) (*Token, error) {
 	now := time.Now()
+	if tenant == "" {
+		tenant = sub
+	}
 	c := Claims{
-		Sub:  sub,
-		Role: role,
-		Iat:  now.UnixMilli(),
-		Exp:  now.Add(i.duration).UnixMilli(),
+		Sub:    sub,
+		Role:   role,
+		Tenant: tenant,
+		Iat:    now.UnixMilli(),
+		Exp:    now.Add(i.duration).UnixMilli(),
 	}
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payloadBytes, _ := json.Marshal(c)

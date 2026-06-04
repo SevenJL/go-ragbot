@@ -106,7 +106,7 @@ func (m *Memory) Search(ctx context.Context, query []float64, topK int) ([]core.
 	return out, nil
 }
 
-func (m *Memory) Docs() []core.DocInfo {
+func (m *Memory) Docs(ctx context.Context) []core.DocInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	counts := map[string]*core.DocInfo{}
@@ -127,7 +127,7 @@ func (m *Memory) Docs() []core.DocInfo {
 	return out
 }
 
-func (m *Memory) Delete(docID string) error {
+func (m *Memory) Delete(ctx context.Context, docID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	kept := m.chunks[:0]
@@ -148,7 +148,7 @@ type idxScore struct {
 
 // AllChunks returns a copy of all stored chunks (embeddings included) for
 // export/backup purposes.
-func (m *Memory) AllChunks() []core.Chunk {
+func (m *Memory) AllChunks(ctx context.Context) []core.Chunk {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]core.Chunk, len(m.chunks))
@@ -158,7 +158,7 @@ func (m *Memory) AllChunks() []core.Chunk {
 
 // Replace atomically replaces the entire chunk set and persists. Used for
 // bulk import/restore.
-func (m *Memory) Replace(chunks []core.Chunk) error {
+func (m *Memory) Replace(ctx context.Context, chunks []core.Chunk) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.chunks = make([]core.Chunk, len(chunks))

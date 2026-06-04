@@ -84,13 +84,22 @@ func main() {
 	sessions := session.NewStore()
 	engine := rag.New(cfg.RAG, emb, store, model, pm, sm, sessions)
 
+	jwtTTL, err := parseDurationOrZero(cfg.Server.JWTTTL)
+	if err != nil {
+		log.Fatalf("server.jwt_ttl: %v", err)
+	}
+
 	// ---- server with full config ----
 	srv := server.NewWithConfig(engine, server.ServerConfig{
-		APIKey:       cfg.Server.APIKey,
-		CORS:         serverCORSFromEnv(),
-		RateLimitRPS: 10,
-		RateBurst:    30,
-		AuditLogPath: cfg.RAG.StorePath + ".audit.jsonl",
+		APIKey:        cfg.Server.APIKey,
+		JWTSecret:     cfg.Server.JWTSecret,
+		JWTTTL:        jwtTTL,
+		AdminUser:     cfg.Server.AdminUsername,
+		AdminPassword: cfg.Server.AdminPassword,
+		CORS:          serverCORSFromEnv(),
+		RateLimitRPS:  10,
+		RateBurst:     30,
+		AuditLogPath:  cfg.RAG.StorePath + ".audit.jsonl",
 	})
 
 	httpSrv := &http.Server{
@@ -179,6 +188,14 @@ func envOrDefault(e string) string {
 		return "default"
 	}
 	return e
+}
+
+func parseDurationOrZero(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(raw)
 }
 
 // serverCORSFromEnv reads CORS configuration from environment variables.

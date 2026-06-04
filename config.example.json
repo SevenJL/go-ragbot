@@ -1,7 +1,11 @@
 {
   "server": {
     "addr": "${RAGBOT_ADDR}",
-    "api_key": "${RAGBOT_API_KEY}"
+    "api_key": "${RAGBOT_API_KEY}",
+    "jwt_secret": "${RAGBOT_JWT_SECRET}",
+    "jwt_ttl": "${RAGBOT_JWT_TTL}",
+    "admin_username": "${RAGBOT_ADMIN_USERNAME}",
+    "admin_password": "${RAGBOT_ADMIN_PASSWORD}"
   },
 
   "llm": {

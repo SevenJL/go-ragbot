@@ -12,8 +12,12 @@ import (
 )
 
 type ServerConfig struct {
-	Addr   string `json:"addr"`
-	APIKey string `json:"api_key"`
+	Addr          string `json:"addr"`
+	APIKey        string `json:"api_key"`
+	JWTSecret     string `json:"jwt_secret"`
+	JWTTTL        string `json:"jwt_ttl"`
+	AdminUsername string `json:"admin_username"`
+	AdminPassword string `json:"admin_password"`
 }
 
 type LLMConfig struct {
@@ -137,6 +141,10 @@ func resolvePath(path string) (string, error) {
 func (c *Config) expandEnv() {
 	c.Server.Addr = os.ExpandEnv(c.Server.Addr)
 	c.Server.APIKey = os.ExpandEnv(c.Server.APIKey)
+	c.Server.JWTSecret = os.ExpandEnv(c.Server.JWTSecret)
+	c.Server.JWTTTL = os.ExpandEnv(c.Server.JWTTTL)
+	c.Server.AdminUsername = os.ExpandEnv(c.Server.AdminUsername)
+	c.Server.AdminPassword = os.ExpandEnv(c.Server.AdminPassword)
 
 	c.LLM.Provider = os.ExpandEnv(c.LLM.Provider)
 	c.LLM.BaseURL = os.ExpandEnv(c.LLM.BaseURL)

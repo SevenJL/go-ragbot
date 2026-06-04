@@ -158,13 +158,13 @@ curl -X POST http://localhost:8080/api/v1/skills \
 
 ### JWT
 
-如果配置了 `server.jwt_secret`，可以通过：
+如果配置了 `server.jwt_secret`，并设置了 `server.admin_username` / `server.admin_password`，可以通过：
 
 ```text
 POST /api/v1/auth/token
 ```
 
-获取 Token。
+获取 Token。为兼容旧部署，已配置 `server.api_key` 时也可以把 API Key 作为密码换取管理员 Token。
 
 ## 接入真实模型或服务
 

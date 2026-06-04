@@ -42,11 +42,63 @@ func TestMemoryStorePersistsSearchesAndDeletes(t *testing.T) {
 		t.Fatal("expected returned embedding to be stripped")
 	}
 
-	if err := reloaded.Delete("doc1"); err != nil {
+	if err := reloaded.Delete(ctx, "doc1"); err != nil {
 		t.Fatal(err)
 	}
 	if reloaded.Count() != 1 {
 		t.Fatalf("count after delete = %d", reloaded.Count())
+	}
+}
+
+func TestTenantStoreScopesDocsDeleteAndReplace(t *testing.T) {
+	base, err := NewMemory("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewTenantStore(base)
+	ctxA := WithTenant(context.Background(), "tenant-a")
+	ctxB := WithTenant(context.Background(), "tenant-b")
+
+	if err := store.Add(ctxA, []core.Chunk{
+		{ID: "doc#0", DocID: "doc", Source: "a.txt", Text: "alpha", Embedding: []float64{1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(ctxB, []core.Chunk{
+		{ID: "doc#0", DocID: "doc", Source: "b.txt", Text: "beta", Embedding: []float64{2}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	docsA := store.Docs(ctxA)
+	if len(docsA) != 1 || docsA[0].Source != "a.txt" || docsA[0].ID != "doc" {
+		t.Fatalf("tenant-a docs = %#v", docsA)
+	}
+	docsB := store.Docs(ctxB)
+	if len(docsB) != 1 || docsB[0].Source != "b.txt" || docsB[0].ID != "doc" {
+		t.Fatalf("tenant-b docs = %#v", docsB)
+	}
+
+	if err := store.Replace(ctxA, []core.Chunk{
+		{ID: "tenant-a:new#0", DocID: "tenant-a:new", Source: "new-a.txt", Text: "new alpha", Embedding: []float64{3}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if docsA = store.Docs(ctxA); len(docsA) != 1 || docsA[0].ID != "new" {
+		t.Fatalf("tenant-a docs after replace = %#v", docsA)
+	}
+	if docsB = store.Docs(ctxB); len(docsB) != 1 || docsB[0].ID != "doc" {
+		t.Fatalf("tenant-b docs after tenant-a replace = %#v", docsB)
+	}
+
+	if err := store.Delete(ctxB, "doc"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Docs(ctxB)) != 0 {
+		t.Fatalf("tenant-b docs after delete = %#v", store.Docs(ctxB))
+	}
+	if len(store.Docs(ctxA)) != 1 {
+		t.Fatalf("tenant-a docs after tenant-b delete = %#v", store.Docs(ctxA))
 	}
 }
 
@@ -67,7 +119,7 @@ func TestMemoryAllChunksAndReplace(t *testing.T) {
 	}
 
 	// AllChunks returns all chunks with embeddings.
-	all := store.AllChunks()
+	all := store.AllChunks(ctx)
 	if len(all) != 2 {
 		t.Fatalf("AllChunks len = %d", len(all))
 	}
@@ -79,7 +131,7 @@ func TestMemoryAllChunksAndReplace(t *testing.T) {
 	replacement := []core.Chunk{
 		{ID: "c#0", DocID: "c", Source: "c.txt", Text: "third", Embedding: []float64{3}},
 	}
-	if err := store.Replace(replacement); err != nil {
+	if err := store.Replace(ctx, replacement); err != nil {
 		t.Fatal(err)
 	}
 	if store.Count() != 1 {
@@ -91,7 +143,8 @@ func TestMemoryAllChunksAndReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Count() != 1 || reloaded.AllChunks()[0].DocID != "c" {
-		t.Fatalf("after reload: count=%d doc=%s", reloaded.Count(), reloaded.AllChunks()[0].DocID)
+	reloadedChunks := reloaded.AllChunks(ctx)
+	if reloaded.Count() != 1 || reloadedChunks[0].DocID != "c" {
+		t.Fatalf("after reload: count=%d doc=%s", reloaded.Count(), reloadedChunks[0].DocID)
 	}
 }

@@ -22,8 +22,8 @@ func NewTenantStore(inner Store) *TenantStore {
 func tenantChunks(tenantID string, chunks []core.Chunk) []core.Chunk {
 	out := make([]core.Chunk, len(chunks))
 	for i, c := range chunks {
-		c.DocID = tenantID + ":" + c.DocID
-		c.ID = tenantID + ":" + c.ID
+		c.DocID = tenantScopedID(tenantID, c.DocID)
+		c.ID = tenantScopedID(tenantID, c.ID)
 		out[i] = c
 	}
 	return out
@@ -56,7 +56,7 @@ func (ts *TenantStore) Add(ctx context.Context, chunks []core.Chunk) error {
 
 func (ts *TenantStore) Search(ctx context.Context, query []float64, topK int) ([]core.RetrievedChunk, error) {
 	tid := tenantFromCtx(ctx)
-	results, err := ts.inner.Search(ctx, query, topK*3) // oversample then filter
+	results, err := ts.inner.Search(ctx, query, candidateLimit(ts.inner.Count(), topK))
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func (ts *TenantStore) Search(ctx context.Context, query []float64, topK int) ([
 
 func (ts *TenantStore) SearchHybrid(ctx context.Context, queryVec []float64, queryText string, topK int) ([]core.RetrievedChunk, error) {
 	tid := tenantFromCtx(ctx)
-	results, err := ts.inner.SearchHybrid(ctx, queryVec, queryText, topK*3)
+	results, err := ts.inner.SearchHybrid(ctx, queryVec, queryText, candidateLimit(ts.inner.Count(), topK))
 	if err != nil {
 		return nil, err
 	}
@@ -95,31 +95,67 @@ func (ts *TenantStore) SearchHybrid(ctx context.Context, queryVec []float64, que
 	return filtered, nil
 }
 
-func (ts *TenantStore) Docs() []core.DocInfo {
-	// Not tenant-scoped for simplicity; callers should provide a scoped version.
-	docs := ts.inner.Docs()
-	for i := range docs {
-		docs[i].ID = stripTenantPrefix(docs[i].ID)
+func (ts *TenantStore) Docs(ctx context.Context) []core.DocInfo {
+	tid := tenantFromCtx(ctx)
+	docs := ts.inner.Docs(ctx)
+	out := make([]core.DocInfo, 0, len(docs))
+	for _, doc := range docs {
+		if matchesTenant(doc.ID, tid) {
+			doc.ID = stripTenantPrefix(doc.ID)
+			out = append(out, doc)
+		}
 	}
-	return docs
+	return out
 }
 
-func (ts *TenantStore) Delete(docID string) error {
-	// docID is tenant-prefixed by the caller.
-	return ts.inner.Delete(docID)
+func (ts *TenantStore) Delete(ctx context.Context, docID string) error {
+	tid := tenantFromCtx(ctx)
+	return ts.inner.Delete(ctx, tenantScopedID(tid, docID))
 }
 
-func (ts *TenantStore) Save() error      { return ts.inner.Save() }
-func (ts *TenantStore) Count() int       { return ts.inner.Count() }
-func (ts *TenantStore) AllChunks() []core.Chunk {
-	chunks := ts.inner.AllChunks()
-	return untenantChunks(chunks)
+func (ts *TenantStore) Save() error { return ts.inner.Save() }
+func (ts *TenantStore) Count() int  { return ts.inner.Count() }
+func (ts *TenantStore) AllChunks(ctx context.Context) []core.Chunk {
+	tid := tenantFromCtx(ctx)
+	chunks := ts.inner.AllChunks(ctx)
+	filtered := make([]core.Chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if matchesTenant(c.DocID, tid) {
+			filtered = append(filtered, c)
+		}
+	}
+	return untenantChunks(filtered)
 }
-func (ts *TenantStore) Replace(chunks []core.Chunk) error { return ts.inner.Replace(chunks) }
+func (ts *TenantStore) Replace(ctx context.Context, chunks []core.Chunk) error {
+	tid := tenantFromCtx(ctx)
+	all := ts.inner.AllChunks(ctx)
+	next := make([]core.Chunk, 0, len(all)+len(chunks))
+	for _, c := range all {
+		if !matchesTenant(c.DocID, tid) {
+			next = append(next, c)
+		}
+	}
+	next = append(next, tenantChunks(tid, chunks)...)
+	return ts.inner.Replace(ctx, next)
+}
 
 func matchesTenant(docID, tenantID string) bool {
 	prefix := tenantID + ":"
 	return len(docID) > len(prefix) && docID[:len(prefix)] == prefix
+}
+
+func tenantScopedID(tenantID, id string) string {
+	return tenantID + ":" + stripTenantPrefix(id)
+}
+
+func candidateLimit(count, topK int) int {
+	if topK <= 0 {
+		return count
+	}
+	if count > topK {
+		return count
+	}
+	return topK
 }
 
 func tenantFromCtx(ctx context.Context) string {

@@ -2,15 +2,19 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"ragbot/internal/auth"
 	"ragbot/internal/config"
 	"ragbot/internal/embedding"
 	"ragbot/internal/llm"
+	"ragbot/internal/middleware"
 	"ragbot/internal/plugin"
 	"ragbot/internal/rag"
 	"ragbot/internal/session"
@@ -19,6 +23,16 @@ import (
 )
 
 func testServer(t *testing.T, apiKey string) *Server {
+	t.Helper()
+	return testServerWithConfig(t, ServerConfig{
+		APIKey:       apiKey,
+		CORS:         middleware.DefaultCORS(),
+		RateLimitRPS: 10,
+		RateBurst:    30,
+	})
+}
+
+func testServerWithConfig(t *testing.T, srvCfg ServerConfig) *Server {
 	t.Helper()
 	emb := embedding.NewLocal(32)
 	store, err := vectorstore.NewMemory("")
@@ -29,7 +43,10 @@ func testServer(t *testing.T, apiKey string) *Server {
 	pm.Register(plugin.NewCalculatorPlugin(true))
 	sm := skill.NewManager()
 	engine := rag.New(config.RAGConfig{TopK: 2, MinScore: 0.1}, emb, store, llm.NewMock(), pm, sm, session.NewStore())
-	return New(engine, apiKey)
+	if srvCfg.CORS.AllowedMethods == nil {
+		srvCfg.CORS = middleware.DefaultCORS()
+	}
+	return NewWithConfig(engine, srvCfg)
 }
 
 func TestAPIAuthDisabledByDefault(t *testing.T) {
@@ -69,6 +86,93 @@ func TestAPIAuthRequiresBearerOrAPIKey(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req.WithContext(context.Background()))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("x-api-key status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJWTTokenRejectsDefaultAdminPassword(t *testing.T) {
+	srv := testServerWithConfig(t, ServerConfig{
+		JWTSecret:     "jwt-secret",
+		JWTTTL:        time.Hour,
+		AdminUser:     "admin",
+		AdminPassword: "configured-secret",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", strings.NewReader(`{"username":"admin","password":"admin"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("default credential status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminOnlyRoutesRejectUserJWT(t *testing.T) {
+	srv := testServerWithConfig(t, ServerConfig{
+		JWTSecret:     "jwt-secret",
+		JWTTTL:        time.Hour,
+		AdminUser:     "admin",
+		AdminPassword: "configured-secret",
+	})
+	tok, err := auth.NewIssuer("jwt-secret", time.Hour).IssueForTenant("alice", auth.RoleUser, "alice", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export", nil)
+	req.Header.Set("Authorization", "Bearer "+tok.Raw)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("user export status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConfiguredJWTAdminCanAccessAdminRoute(t *testing.T) {
+	srv := testServerWithConfig(t, ServerConfig{
+		JWTSecret:     "jwt-secret",
+		JWTTTL:        time.Hour,
+		AdminUser:     "admin",
+		AdminPassword: "configured-secret",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", strings.NewReader(`{"username":"admin","password":"configured-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.AccessToken == "" {
+		t.Fatal("missing access token")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/export", nil)
+	req.Header.Set("Authorization", "Bearer "+body.AccessToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin export status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminRoutesRemainOpenInDevMode(t *testing.T) {
+	srv := testServer(t, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/export", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dev export status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

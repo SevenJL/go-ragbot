@@ -13,18 +13,18 @@ type Store interface {
 	Add(ctx context.Context, chunks []core.Chunk) error
 	// Search returns the topK most similar chunks to query by cosine similarity.
 	Search(ctx context.Context, query []float64, topK int) ([]core.RetrievedChunk, error)
-	// Docs lists stored documents.
-	Docs() []core.DocInfo
+	// Docs lists stored documents visible to ctx.
+	Docs(ctx context.Context) []core.DocInfo
 	// Delete removes every chunk belonging to docID.
-	Delete(docID string) error
+	Delete(ctx context.Context, docID string) error
 	// Save persists the store to disk.
 	Save() error
 	// Count returns the number of stored chunks.
 	Count() int
-	// AllChunks returns every stored chunk for export/backup.
-	AllChunks() []core.Chunk
-	// Replace atomically replaces all stored chunks (used for import).
-	Replace(chunks []core.Chunk) error
+	// AllChunks returns every stored chunk visible to ctx for export/backup.
+	AllChunks(ctx context.Context) []core.Chunk
+	// Replace atomically replaces the chunk set visible to ctx (used for import).
+	Replace(ctx context.Context, chunks []core.Chunk) error
 	// SearchHybrid performs both vector (cosine) and keyword (TF-IDF) search,
 	// merging results with Reciprocal Rank Fusion. Falls back to pure vector
 	// search if keywordWeight is 0.

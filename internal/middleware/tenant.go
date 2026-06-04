@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"ragbot/internal/auth"
 	"ragbot/internal/core"
 )
 
@@ -12,6 +13,9 @@ import (
 func TenantID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tid := r.Header.Get("X-Tenant-ID")
+		if claims := auth.GetClaims(r.Context()); claims != nil && !auth.HasRole(claims, auth.RoleAdmin) {
+			tid = claims.Tenant
+		}
 		if tid == "" {
 			tid = "default"
 		}

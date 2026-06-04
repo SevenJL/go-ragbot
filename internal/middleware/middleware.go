@@ -120,7 +120,7 @@ func DefaultCORS() CORSConfig {
 	return CORSConfig{
 		AllowedOrigins: nil, // allow all origins in dev
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Content-Type", "Authorization", "X-API-Key", "X-Request-ID"},
+		AllowedHeaders: []string{"Content-Type", "Authorization", "X-API-Key", "X-Request-ID", "X-Tenant-ID"},
 		MaxAge:         86400,
 	}
 }
@@ -190,11 +190,11 @@ func itoa(n int) string {
 // concurrent use. Burst allows short spikes; rate defines the sustained refill
 // rate in requests per second.
 type RateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*tokenBucket
-	rate     float64 // tokens per second
-	burst    int     // max tokens
-	cleanup  time.Time
+	mu      sync.Mutex
+	buckets map[string]*tokenBucket
+	rate    float64 // tokens per second
+	burst   int     // max tokens
+	cleanup time.Time
 }
 
 type tokenBucket struct {

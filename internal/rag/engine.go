@@ -101,20 +101,35 @@ func (e *Engine) Ingest(ctx context.Context, filename string, data []byte) (stri
 // then loads, chunks, embeds and stores the new content. Returns the (same)
 // docID and new chunk count.
 func (e *Engine) UpdateDoc(ctx context.Context, docID, filename string, data []byte) (string, int, error) {
-	if err := e.store.Delete(docID); err != nil {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	if err := e.store.Delete(storeCtx, docID); err != nil {
 		return "", 0, fmt.Errorf("delete old chunks for %s: %w", docID, err)
 	}
 	return e.Ingest(ctx, filename, data)
 }
 
+// Docs lists stored documents visible to the current tenant.
+func (e *Engine) Docs(ctx context.Context) []core.DocInfo {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	return e.store.Docs(storeCtx)
+}
+
+// DeleteDoc removes a document visible to the current tenant.
+func (e *Engine) DeleteDoc(ctx context.Context, docID string) error {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	return e.store.Delete(storeCtx, docID)
+}
+
 // ExportAll returns every stored chunk (with embeddings) for backup.
-func (e *Engine) ExportAll() []core.Chunk {
-	return e.store.AllChunks()
+func (e *Engine) ExportAll(ctx context.Context) []core.Chunk {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	return e.store.AllChunks(storeCtx)
 }
 
 // ImportAll atomically replaces all stored chunks with the given set.
-func (e *Engine) ImportAll(chunks []core.Chunk) error {
-	return e.store.Replace(chunks)
+func (e *Engine) ImportAll(ctx context.Context, chunks []core.Chunk) error {
+	storeCtx := vectorstore.WithTenant(ctx, core.GetTenantID(ctx))
+	return e.store.Replace(storeCtx, chunks)
 }
 
 // AnswerResult is the structured outcome of handling a message.

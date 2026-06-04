@@ -9,10 +9,18 @@ import (
 func TestLoadHandlesBOMEnvAndDefaults(t *testing.T) {
 	t.Setenv("RAGBOT_TEST_API_KEY", "secret-token")
 	t.Setenv("RAGBOT_TEST_MODEL", "real-model")
+	t.Setenv("RAGBOT_TEST_JWT_SECRET", "jwt-secret")
+	t.Setenv("RAGBOT_TEST_ADMIN_PASSWORD", "admin-secret")
 
 	path := filepath.Join(t.TempDir(), "config.json")
 	raw := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{
-		"server": { "api_key": "${RAGBOT_TEST_API_KEY}" },
+		"server": {
+			"api_key": "${RAGBOT_TEST_API_KEY}",
+			"jwt_secret": "${RAGBOT_TEST_JWT_SECRET}",
+			"jwt_ttl": "12h",
+			"admin_username": "admin",
+			"admin_password": "${RAGBOT_TEST_ADMIN_PASSWORD}"
+		},
 		"llm": { "provider": "mock", "model": "$RAGBOT_TEST_MODEL" },
 		"embedding": { "provider": "local" },
 		"rag": {},
@@ -32,6 +40,12 @@ func TestLoadHandlesBOMEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.Server.APIKey != "secret-token" {
 		t.Fatalf("api key was not expanded: %q", cfg.Server.APIKey)
+	}
+	if cfg.Server.JWTSecret != "jwt-secret" || cfg.Server.JWTTTL != "12h" {
+		t.Fatalf("jwt config not loaded: secret=%q ttl=%q", cfg.Server.JWTSecret, cfg.Server.JWTTTL)
+	}
+	if cfg.Server.AdminUsername != "admin" || cfg.Server.AdminPassword != "admin-secret" {
+		t.Fatalf("admin config not loaded: user=%q password=%q", cfg.Server.AdminUsername, cfg.Server.AdminPassword)
 	}
 	if cfg.LLM.Model != "real-model" {
 		t.Fatalf("model was not expanded: %q", cfg.LLM.Model)

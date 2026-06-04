@@ -140,8 +140,8 @@ func (ps *PostgresStore) SearchHybrid(ctx context.Context, queryVec []float64, q
 	return results, rows.Err()
 }
 
-func (ps *PostgresStore) Docs() []core.DocInfo {
-	rows, err := ps.db.Query(`SELECT doc_id, source, COUNT(*) FROM chunks GROUP BY doc_id, source ORDER BY source`)
+func (ps *PostgresStore) Docs(ctx context.Context) []core.DocInfo {
+	rows, err := ps.db.QueryContext(ctx, `SELECT doc_id, source, COUNT(*) FROM chunks GROUP BY doc_id, source ORDER BY source`)
 	if err != nil {
 		return nil
 	}
@@ -157,8 +157,8 @@ func (ps *PostgresStore) Docs() []core.DocInfo {
 	return out
 }
 
-func (ps *PostgresStore) Delete(docID string) error {
-	_, err := ps.db.Exec(`DELETE FROM chunks WHERE doc_id = $1`, docID)
+func (ps *PostgresStore) Delete(ctx context.Context, docID string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM chunks WHERE doc_id = $1`, docID)
 	return err
 }
 
@@ -170,8 +170,8 @@ func (ps *PostgresStore) Count() int {
 	return n
 }
 
-func (ps *PostgresStore) AllChunks() []core.Chunk {
-	rows, err := ps.db.Query(`SELECT id, doc_id, source, idx, text, embedding::text FROM chunks`)
+func (ps *PostgresStore) AllChunks(ctx context.Context) []core.Chunk {
+	rows, err := ps.db.QueryContext(ctx, `SELECT id, doc_id, source, idx, text, embedding::text FROM chunks`)
 	if err != nil {
 		return nil
 	}
@@ -189,18 +189,18 @@ func (ps *PostgresStore) AllChunks() []core.Chunk {
 	return out
 }
 
-func (ps *PostgresStore) Replace(chunks []core.Chunk) error {
-	tx, err := ps.db.Begin()
+func (ps *PostgresStore) Replace(ctx context.Context, chunks []core.Chunk) error {
+	tx, err := ps.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM chunks`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks`); err != nil {
 		return err
 	}
 	for _, c := range chunks {
 		embJSON, _ := json.Marshal(c.Embedding)
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO chunks (id, doc_id, source, idx, text, embedding) VALUES ($1,$2,$3,$4,$5,$6::vector)`,
 			c.ID, c.DocID, c.Source, c.Index, c.Text, string(embJSON),
 		); err != nil {

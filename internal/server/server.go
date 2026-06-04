@@ -7,9 +7,9 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
-	"io/fs"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -29,8 +29,8 @@ import (
 var webAssets embed.FS
 
 var (
-	webDistFS   = mustSubFS(webAssets, "web/dist")
-	webAssetFS  = mustSubFS(webAssets, "web/dist/assets")
+	webDistFS  = mustSubFS(webAssets, "web/dist")
+	webAssetFS = mustSubFS(webAssets, "web/dist/assets")
 )
 
 func mustSubFS(root fs.FS, dir string) fs.FS {
@@ -43,13 +43,15 @@ func mustSubFS(root fs.FS, dir string) fs.FS {
 
 // ServerConfig holds options for the HTTP layer.
 type ServerConfig struct {
-	APIKey       string // legacy shared API key (backward compat)
-	JWTSecret    string // JWT signing secret; empty = JWT auth disabled
-	JWTTTL       time.Duration // token lifetime; 0 = 24h
-	CORS         middleware.CORSConfig
-	RateLimitRPS float64 // requests per second per IP; 0 = no limit
-	RateBurst    int     // max burst; 0 = 2× RPS
-	AuditLogPath string  // path to audit log file; empty = stdout only
+	APIKey        string        // legacy shared API key (backward compat)
+	JWTSecret     string        // JWT signing secret; empty = JWT auth disabled
+	JWTTTL        time.Duration // token lifetime; 0 = 24h
+	AdminUser     string        // username accepted by /api/v1/auth/token
+	AdminPassword string        // password accepted by /api/v1/auth/token
+	CORS          middleware.CORSConfig
+	RateLimitRPS  float64 // requests per second per IP; 0 = no limit
+	RateBurst     int     // max burst; 0 = 2× RPS
+	AuditLogPath  string  // path to audit log file; empty = stdout only
 }
 
 // Server holds the engine and HTTP configuration.
@@ -118,8 +120,8 @@ func (s *Server) Audit() *audit.Logger { return s.audit }
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 
-	// Request body limit (1 MB for general API calls; upload has its own limit).
-	h = middleware.MaxBytes(1 << 20)(h)
+	// Request body limit. Upload/import endpoints need room for documents and backups.
+	h = middleware.MaxBytes(32 << 20)(h)
 
 	// Structured request logging (innermost to capture accurate timing).
 	h = s.withStructuredLogging(h)
@@ -159,13 +161,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/upload", s.withAPIAuth(s.handleUpload))
 	s.mux.HandleFunc("/api/v1/docs", s.withAPIAuth(s.handleDocs))
 	s.mux.HandleFunc("/api/v1/plugins", s.withAPIAuth(s.handlePlugins))
-	s.mux.HandleFunc("/api/v1/plugins/toggle", s.withAPIAuth(s.handlePluginToggle))
+	s.mux.HandleFunc("/api/v1/plugins/toggle", s.withAdminAuth(s.handlePluginToggle))
 	s.mux.HandleFunc("/api/v1/skills", s.withAPIAuth(s.handleSkills))
 	// Backup & restore.
-	s.mux.HandleFunc("/api/v1/export", s.withAPIAuth(s.handleExport))
-	s.mux.HandleFunc("/api/v1/import", s.withAPIAuth(s.handleImport))
+	s.mux.HandleFunc("/api/v1/export", s.withAdminAuth(s.handleExport))
+	s.mux.HandleFunc("/api/v1/import", s.withAdminAuth(s.handleImport))
 	// Metrics (Prometheus).
-	s.mux.HandleFunc("/api/v1/metrics", s.metrics.Handler())
+	s.mux.HandleFunc("/api/v1/metrics", s.withAdminAuth(s.metrics.Handler()))
 	// Auth (JWT token endpoints).
 	s.mux.HandleFunc("/api/v1/auth/token", s.handleAuthToken)
 
@@ -261,6 +263,26 @@ func (s *Server) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ragbot"`)
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 	}
+}
+
+func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.withAPIAuth(func(w http.ResponseWriter, r *http.Request) {
+		if s.isAdminRequest(r) {
+			next(w, r)
+			return
+		}
+		writeErr(w, http.StatusForbidden, "admin role required")
+	})
+}
+
+func (s *Server) isAdminRequest(r *http.Request) bool {
+	if s.cfg.APIKey == "" && s.jwtIssuer == nil {
+		return true
+	}
+	if claims := auth.GetClaims(r.Context()); claims != nil {
+		return auth.HasRole(claims, auth.RoleAdmin)
+	}
+	return s.cfg.APIKey != "" && validAPIKey(r, s.cfg.APIKey)
 }
 
 func validAPIKey(r *http.Request, want string) bool {
@@ -359,14 +381,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":    "ok",
-		"version":   "v1",
-		"chunks":    s.engine.Store().Count(),
-		"sessions":  s.engine.Sessions().Count(),
-		"plugins":   len(s.engine.Plugins().All()),
-		"skills":    len(s.engine.Skills().All()),
-		"embedder":  s.engine.EmbedderName(),
-		"llm":       s.engine.LLMName(),
+		"status":   "ok",
+		"version":  "v1",
+		"chunks":   s.engine.Store().Count(),
+		"sessions": s.engine.Sessions().Count(),
+		"plugins":  len(s.engine.Plugins().All()),
+		"skills":   len(s.engine.Skills().All()),
+		"embedder": s.engine.EmbedderName(),
+		"llm":      s.engine.LLMName(),
 	})
 }
 
@@ -515,8 +537,8 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
-		role := s.getUserRole(req.Username)
-		tok, err := s.jwtIssuer.Issue(req.Username, role, "")
+		role := s.getUserRole(req.Username, req.Password)
+		tok, err := s.jwtIssuer.IssueForTenant(req.Username, role, s.tenantForToken(req.Username, role), "")
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "token issue failed")
 			return
@@ -524,7 +546,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"access_token": tok.Raw,
 			"token_type":   "Bearer",
-			"expires_in":   int64(s.cfg.JWTTTL.Seconds()),
+			"expires_in":   int64(s.jwtTTL().Seconds()),
 			"role":         string(role),
 		})
 		return
@@ -552,20 +574,36 @@ func (s *Server) validateCredentials(username, password string) bool {
 	if s.cfg.APIKey != "" && password == s.cfg.APIKey {
 		return true
 	}
-	// For demo purposes, accept a simple admin credential.
-	if username == "admin" && password == "admin" {
+	if s.cfg.AdminUser != "" && s.cfg.AdminPassword != "" &&
+		username == s.cfg.AdminUser && password == s.cfg.AdminPassword {
 		return true
 	}
 	return false
 }
 
-// getUserRole returns the role for a username. Default: "user".
-// Admin users: any user authenticated with the legacy API key.
-func (s *Server) getUserRole(username string) auth.Role {
-	if username == "admin" {
+// getUserRole returns the role granted by the configured credentials.
+func (s *Server) getUserRole(username, password string) auth.Role {
+	if s.cfg.AdminUser != "" && username == s.cfg.AdminUser {
+		return auth.RoleAdmin
+	}
+	if s.cfg.APIKey != "" && password == s.cfg.APIKey {
 		return auth.RoleAdmin
 	}
 	return auth.RoleUser
+}
+
+func (s *Server) jwtTTL() time.Duration {
+	if s.cfg.JWTTTL > 0 {
+		return s.cfg.JWTTTL
+	}
+	return 24 * time.Hour
+}
+
+func (s *Server) tenantForToken(username string, role auth.Role) string {
+	if role == auth.RoleAdmin {
+		return "default"
+	}
+	return username
 }
 
 func sanitizeRetrieved(res *rag.AnswerResult) {
@@ -632,7 +670,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.engine.Store().Docs())
+		writeJSON(w, http.StatusOK, s.engine.Docs(r.Context()))
 	case http.MethodPost:
 		s.handleDocUpdate(w, r)
 	case http.MethodDelete:
@@ -683,7 +721,7 @@ func (s *Server) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	err := s.engine.Store().Delete(id)
+	err := s.engine.DeleteDoc(r.Context(), id)
 	s.audit.DocDelete(s.actorFromRequest(r), id, err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -701,7 +739,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	chunks := s.engine.ExportAll()
+	chunks := s.engine.ExportAll(r.Context())
 	s.audit.Export(s.actorFromRequest(r))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=ragbot-export.json")
@@ -735,7 +773,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err := s.engine.ImportAll(req.Chunks)
+	err := s.engine.ImportAll(r.Context(), req.Chunks)
 	s.audit.Import(s.actorFromRequest(r), len(req.Chunks), err)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "import failed: "+err.Error())
@@ -804,8 +842,16 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listSkills(w, r)
 	case http.MethodPost:
+		if !s.isAdminRequest(r) {
+			writeErr(w, http.StatusForbidden, "admin role required")
+			return
+		}
 		s.registerSkill(w, r)
 	case http.MethodDelete:
+		if !s.isAdminRequest(r) {
+			writeErr(w, http.StatusForbidden, "admin role required")
+			return
+		}
 		s.unregisterSkill(w, r)
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "GET, POST or DELETE")
